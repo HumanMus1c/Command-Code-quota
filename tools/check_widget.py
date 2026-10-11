@@ -188,6 +188,39 @@ PROBE = "JSON.stringify(window.__goatProbe())"
 
 SHAPES = "JSON.stringify((window.__goatProbe().shapeChanges || []).slice(0,2))"
 
+# Narrow the composer column so the row is under real width pressure: the board
+# must degrade presentation, and then leave it alone while the data holds still.
+NARROW = """
+(() => {
+  const column = document.querySelector('.cc-composer-host');
+  column.style.maxWidth = '230px';
+  return column.style.maxWidth;
+})()
+"""
+
+WIDEN = """
+(() => {
+  const column = document.querySelector('.cc-composer-host');
+  column.style.maxWidth = '';
+  return column.style.maxWidth || 'restored';
+})()
+"""
+
+SHED = """
+(() => {
+  const node = document.getElementById('goat-gauge-widget');
+  const row = node.shadowRoot.getElementById('row');
+  const probe = window.__goatProbe();
+  return JSON.stringify({
+    layout: node.dataset.layout,
+    level: probe.shedLevel,
+    shed: row.querySelectorAll('.cd.shed, .bar.shed').length,
+    moves: probe.levelChanges,
+    metrics: row.querySelectorAll('.chip[data-metric]').length,
+  });
+})()
+"""
+
 # Replace the fixture's mock with one whose numbers move by exactly one field,
 # so a keyed/guarded renderer must rewrite only that chip.
 MOVE_ONE = """
@@ -264,6 +297,39 @@ def main() -> int:
             f"ghost: unchanged data writes nothing for {OBSERVE_SECONDS:.0f}s (>2 polls)",
             seen.get("count", -1) == 0 and seen.get("shapes_grew", 1) == 0,
             json.dumps({k: v for k, v in seen.items() if k != "where"}) + " " + json.dumps(seen.get("where")) + " " + str(harness.evaluate(SHAPES))[:180],
+        ))
+
+        # A degraded board has to hold still as well: shedding is one level, and a
+        # level that did not change may not cost a single class write.
+        wide = json.loads(harness.evaluate(SHED) or "{}")
+        harness.evaluate(NARROW)
+        time.sleep(POLL_MS / 1000 + 1.5)
+        shed = json.loads(harness.evaluate(SHED) or "{}")
+        results.append((
+            "degrade: a narrow board costs decoration, never a metric",
+            shed.get("shed", 0) > 0
+            and shed.get("level", -1) >= 0
+            and shed.get("metrics") == wide.get("metrics")
+            and shed.get("moves", 0) > wide.get("moves", 0),
+            f"wide={json.dumps(wide)} -> {json.dumps(shed)}",
+        ))
+        harness.evaluate(ARM)
+        time.sleep(OBSERVE_SECONDS)
+        tight = json.loads(harness.evaluate(READ) or "{}")
+        still = json.loads(harness.evaluate(SHED) or "{}")
+        results.append((
+            f"ghost: a settled shed board writes nothing for {OBSERVE_SECONDS:.0f}s",
+            tight.get("count", -1) == 0 and still.get("moves") == shed.get("moves"),
+            json.dumps({k: v for k, v in tight.items() if k != "where"})
+            + " " + json.dumps(tight.get("where")) + " " + json.dumps(still),
+        ))
+        harness.evaluate(WIDEN)
+        time.sleep(1.0)
+        back = json.loads(harness.evaluate(SHED) or "{}")
+        results.append((
+            "restore: widening buys the presentation back at the same metric set",
+            back.get("shed", 1) == 0 and back.get("metrics") == shed.get("metrics"),
+            json.dumps(back),
         ))
 
         harness.evaluate(TAG)
