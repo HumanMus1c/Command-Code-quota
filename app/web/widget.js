@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "5";
+  const VERSION = "6";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -553,11 +553,11 @@
         if (!host || !isFinite(host.monthly)) {
           return "";
         }
-        const cap = monthlyCap(host);
-        const reset = host.periodEnd || pushedMonthly().reset_at;
-        if (isFinite(cap) && cap > 0) {
-          return meterChip("month", L.month, Math.max(0, cap - host.monthly), cap, reset);
+        const meter = monthlyMeter(host);
+        if (meter) {
+          return meterChip("month", L.month, meter.used, meter.cap, meter.reset);
         }
+        const reset = pushedMonthly().reset_at || host.periodEnd || 0;
         // Still no ceiling by either route: show the remainder without a bar
         // rather than inventing a denominator to fill one.
         return (
@@ -1154,6 +1154,23 @@
     return (read / (read + input)) * 100;
   }
 
+  /* used and cap must come from the SAME pool: the service's plan quota
+   * (cap/remaining) and the host's credit balance are different things, and
+   * pairing one's numerator with the other's denominator is simply false data. */
+  function monthlyMeter(host) {
+    const pushed = pushedMonthly();
+    if (isFinite(pushed.cap) && pushed.cap > 0 && isFinite(pushed.remaining)) {
+      return { used: Math.max(0, pushed.cap - pushed.remaining), cap: pushed.cap,
+        reset: pushed.reset_at || (host && host.periodEnd) || 0, source: "plan" };
+    }
+    const estimate = isFinite(host && host.monthly) ? monthlyCap(host) : NaN;
+    if (isFinite(estimate) && estimate > 0) {
+      return { used: Math.max(0, estimate - host.monthly), cap: estimate,
+        reset: (host && host.periodEnd) || pushed.reset_at || 0, source: "est" };
+    }
+    return null;
+  }
+
   function rates() {
     const pushed = (state.pushed && state.pushed.rates) || {};
     const derived = derivedRates();
@@ -1354,7 +1371,8 @@
       node.inert ? "inert" : "live",
       board,
       `w${measured}xh${height}`,
-      `src=${state.pushed ? "push" : "-"}+${state.host ? "host" : "-"}+${isFinite(burn) ? "sample" : "-"}`,
+      `src=${state.pushed ? "push" : "-"}+${state.host ? "host" : "-"}+${isFinite(burn) ? "sample" : "-"}` +
+      `+${(() => { const host = state.host ? hostPayload(state.host) : null; const m = host && monthlyMeter(host); return m ? "m" + m.source : "m-"; })()}`,
     ].join("|");
   }
 
