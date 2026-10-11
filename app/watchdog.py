@@ -476,6 +476,28 @@ def follow(
     return 0
 
 
+INJECT_LOCK_NAME = "inject.lock"
+
+
+def claim_inject_lock(
+    *, alive: Callable[[int], bool] = pid_alive
+) -> tuple[Path, str] | None:
+    """Gate the DevTools registration to a single process.
+
+    The HTTP port cannot serve as the mutex: an instance that fails to bind it
+    still runs its injector thread, so N instances end up each registering the
+    readout and pushing their own numbers over one another.
+    """
+    path = runtime_dir() / INJECT_LOCK_NAME
+    token = uuid.uuid4().hex
+    return (path, token) if acquire_lock(path, token=token, pid=os.getpid(), alive=alive) else None
+
+
+def release_inject_lock(claim: tuple[Path, str] | None) -> None:
+    if claim:
+        release_lock(claim[0], token=claim[1])
+
+
 def status(*, profile: Path | None = None, capture: Callable[[list[str]], str] = _capture) -> dict[str, Any]:
     profile = profile or commandcode_profile_dir()
     port = devtools_port(profile)

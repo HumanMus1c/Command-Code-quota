@@ -173,6 +173,10 @@ class ActivityRateTestCase(LiveTestCaseBase):
             "status": "completed",
         }
 
+    def test_no_cache_buckets_report_no_hit_rate(self) -> None:
+        # Absence is not a measured 0.0%: the readout must drop the chip.
+        self.assertIsNone(self.service.live()["rates"]["hit_rate_pct"])
+
     def test_no_records_has_no_basis(self) -> None:
         rates = self.service.live()["rates"]
         self.assertEqual(rates["basis"], "none")

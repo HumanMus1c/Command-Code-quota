@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "6";
+  const VERSION = "7";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -538,7 +538,11 @@
 
   function pushedMonthly() {
     const monthly = (state.pushed && state.pushed.monthly) || {};
-    return { cap: Number(monthly.cap), remaining: Number(monthly.remaining), reset_at: Number(monthly.reset_at) || 0 };
+    return {
+      cap: number(monthly.cap),
+      remaining: number(monthly.remaining),
+      reset_at: number(monthly.reset_at) || 0,
+    };
   }
 
   function metricHtml(id, host, pushed, L) {
@@ -1171,11 +1175,16 @@
     return null;
   }
 
+  /* Number(null) and Number("") are both 0, so a field the server deliberately
+   * omitted must not arrive as a measured zero (spec D-2). */
+  const number = (value) =>
+    value === null || value === undefined || value === "" ? NaN : Number(value);
+
   function rates() {
     const pushed = (state.pushed && state.pushed.rates) || {};
     const derived = derivedRates();
-    const hit = Number(pushed.hit_rate_pct);
-    const pick = (name, value) => (isFinite(Number(value)) ? Number(value) : Number(derived[name]));
+    const pick = (name, value) => (isFinite(number(value)) ? number(value) : number(derived[name]));
+    const hit = number(pushed.hit_rate_pct);
     return {
       tokens_per_sec: pick("tokens_per_sec", pushed.tokens_per_sec),
       requests_per_min: pick("requests_per_min", pushed.requests_per_min),
@@ -1185,11 +1194,11 @@
 
   function projections() {
     const pushed = ((state.pushed && state.pushed.projections) || {}).five_hour || {};
-    const burn = Number(pushed.burn_per_hour);
+    const burn = number(pushed.burn_per_hour);
     if (isFinite(burn)) {
       return { five_hour: { burn_per_hour: burn, verdict: pushed.verdict } };
     }
-    const derived = Number(derivedRates().burn);
+    const derived = number(derivedRates().burn);
     return { five_hour: isFinite(derived) ? { burn_per_hour: derived } : {} };
   }
 

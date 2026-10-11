@@ -779,8 +779,12 @@ class GaugeService:
         )
         # Cache hit rate comes from the aggregate buckets rather than the record
         # sample, and both the HTTP endpoint and the injected readout read it
-        # from here so they cannot drift apart.
-        rates["hit_rate_pct"] = round(self.store.cache_stats("today").get("hit_rate", 0.0), 2)
+        # from here so they cannot drift apart. An empty sample answers None:
+        # a 0.0% hit rate is a measurement, absence is not (spec D-2).
+        cache = self.store.cache_stats("today")
+        rates["hit_rate_pct"] = (
+            round(float(cache.get("hit_rate") or 0.0), 2) if cache.get("tokens_in") else None
+        )
 
         records, new_count = self.store.usage_records_newer_than(
             max(0, int(since_ms)),
@@ -1347,16 +1351,27 @@ def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False) ->
     service = GaugeService(demo=demo)
     bound_host, bound_port = start_server(host=host, port=port, service=service)
     service.start_background()
+    claim = None
     if inject:
         from .inject import commandcode_profile_dir, start_injection
+        from .watchdog import claim_inject_lock
 
         profile = commandcode_profile_dir()
-        start_injection(service, service.stop_event)
-        print(
-            "读数条注入已启动；若 Command Code 未带调试端口运行则不会挂载。"
-            f"\n  宿主配置目录: {profile}",
-            flush=True,
-        )
+        claim = claim_inject_lock()
+        if claim is None:
+            # The port tells us nothing about who is injecting; a second
+            # registration would fight the first one for the same slot.
+            print(
+                "已有实例在注入读数条，本实例只提供本地服务，不会重复注册。",
+                flush=True,
+            )
+        else:
+            start_injection(service, service.stop_event)
+            print(
+                "读数条注入已启动；若 Command Code 未带调试端口运行则不会挂载。"
+                f"\n  宿主配置目录: {profile}",
+                flush=True,
+            )
     print(f"GOAT Gauge: http://{bound_host}:{bound_port}/", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     try:
@@ -1367,3 +1382,7 @@ def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False) ->
     finally:
         stop_server()
         service.stop()
+        if claim is not None:
+            from .watchdog import release_inject_lock
+
+            release_inject_lock(claim)

@@ -126,6 +126,23 @@ class RuntimeDirTests(unittest.TestCase):
         self.assertFalse(lock.exists())
 
 
+class InjectLockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp(prefix="goat-injectlock-"))
+        environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_a_second_injector_backs_off_instead_of_double_registering(self) -> None:
+        mine = watchdog.claim_inject_lock(alive=lambda pid: pid == os.getpid())
+        self.assertIsNotNone(mine)
+        self.assertIsNone(watchdog.claim_inject_lock(alive=lambda pid: pid == os.getpid()))
+        watchdog.release_inject_lock(mine)
+        again = watchdog.claim_inject_lock(alive=lambda pid: pid == os.getpid())
+        self.assertIsNotNone(again)
+        watchdog.release_inject_lock(again)
+
+
 class FakeInjector:
     def __init__(self, **kwargs) -> None:
         self.count = 0

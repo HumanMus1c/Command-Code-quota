@@ -809,6 +809,28 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   check("ambiguity: two visible composers mount nothing rather than guess",
     !findById(twinWorld.doc.documentElement, "goat-gauge-widget"));
 
+  // ---- a null from the server is absence, not a measured zero ----
+  const zeroWorld = composerDoc();
+  const zeroRun = run({
+    doc: zeroWorld.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  await zeroRun.fire("timeout");
+  await tick();
+  const zeroWidget = findById(zeroWorld.doc.documentElement, "goat-gauge-widget");
+  const accepted = zeroRun.win.window.__goatUpdate({
+    version: VERSION,
+    rates: { hit_rate_pct: null, tokens_per_sec: null, requests_per_min: null },
+    projections: { five_hour: { burn_per_hour: null } },
+    monthly: {},
+  });
+  check("null: payload still accepted", accepted && accepted.ok, JSON.stringify(accepted));
+  const zeroHtml = zeroWidget.shadow.getElementById("row").innerHTML;
+  check("null: no fake 0.0% painted for an absent measurement",
+    !/0\.0%/.test(zeroHtml), zeroHtml.slice(0, 80));
+  check("null: the absent cache chip is really gone",
+    !zeroHtml.includes('data-metric="cache"'), zeroHtml.slice(0, 80));
+
   // ---- occlusion: hiding takes a real pointer hit, and hiding means inert ----
   const covered = composerDoc();
   const floatButton = new El("button");
