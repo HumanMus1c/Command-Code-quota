@@ -198,6 +198,11 @@
     改成局部更新时漏掉。
   - `prefers-reduced-motion` 继续生效（`widget.js:705` 已用 `transition:none!important`），
     后续若加降级过渡动画，不得用 JS 动画绕过这条媒体查询。
+- **P-9 降级是一个"层级"，只在层级真的改变时才写 class**：`-1` 单行、`0..N` 依次牺牲 N 个装饰、装饰牺牲完才放弃
+    限高。数据轮询只做**读取式测量**并在证据不足时把层级往下走一步；往回升级需要"未降级时的宽度"，而这个宽度
+    只能靠先取消降级来测——因此升级只允许由**真实 resize** 或**整行重建**（`paint()` 走了全量写分支）触发。
+    每次层级迁移由 `setLevel()` 计入 `levelChanges`（无界计数器）与 `shedChanges`（有界留痕），
+    空闲窗口"层级没动"必须能直接读出来，而不是靠 MutationObserver 反推。
 
 ## 7. 故障 × 防护 × 验证
 
@@ -294,6 +299,40 @@
 工装因此要求：观察期内 `shapeChanges` 不得增长，且数值变化必须就地打补丁（节点全部存活）
 同时数字与条宽确实更新。
 
+**重影归零第二回合：降级改为层级（2026-10-12，`31e9d5f`）**
+- **根因**：真机 12 秒静置窗口测得 9 次变更 = `child:3` + `attr:6`，`attr:class@SPAN.bar`/`SPAN.cd`
+  全部出自 `fit()`：它每轮先清空 `shed`、再按"未降级宽度"重新测量、再把该加的 class 加回去。
+  于是只变数字的轮询也要付一次完整的降级循环。
+- **修复**：`fit()` 改持一个层级（见 P-9）。轮询只读式测量、按证据向下走；向上升级只在真实 resize
+  (`refit()`) 或整行重建 (`paint()` 全量写分支置 `state.climb`) 时才做。`setLevel()` 自带**无上限计数**
+  `levelChanges` 与有界环形日志 `shedChanges`，"层级没动"因此可在环形缓冲区写满之后仍然被证明。
+  协议版本 11 → 12（`WIDGET_VERSION` 与 `widget.js` 的 `VERSION` 必须同笔提交，两侧要一致）。
+- **效果验证**：
+  - 真浏览器夹具 `tools/check_widget.py` 从 6/6 扩到 **9/9**（`e5d698f`）：新增窄列降级、
+    **降级板面 8 秒零变更 + `levelChanges` 不增长**、放宽后装饰回归且指标集不变。
+    窄列实测 `wide{level:0,shed:0} → {layout:tall,level:6,shed:6,metrics 不变}`，只记 **1** 次层级迁移。
+  - 真机（未重启宿主，只重启本仓库服务；`entry.py --watch` 路径）v12 回读
+    `state=live layout=full level=-1 metrics=7`，12 秒静置窗口 **count=0（child/attr/text/style 全 0）**，
+    `levelChanges` 增量 0、`shapeChanges` 停在启动的 2 条；状态点仍是 `rgb(120,222,143)`。
+    测量脚本只读：直连既有 DevTools target，**不另起注入器**（避免已记录的多注入器互相覆盖陷阱）。
+  - Python 套件 134 项：仅 `test_credentials.test_saved_session_survives_restart` 失败，
+    属本机 CC Switch 存在真实 key 的既有基线，非回归。
+- **仍未做**：上一轮那个 `child:3`（指标在场与否随数据抖动导致整行全量重写）**本轮窗口内未复现，但没有被针对性修改**，
+  不能记为已消除；真机窄列降级也**未实测**（要动用户正在用的 composer 宽度），该形态只由夹具证明。
+  待办顺序保持：① 槽位成员与数据可得性解耦；② `tok/s` 换成上下文占用；③ 面板对齐。
+
+**登录自启动此前从未生效（2026-10-12，`d515db5`）**
+`install.ps1` 写进 HKCU Run 键的是 `entry.py --watch`，而 `entry.py` 把这个名字**原样转发**给守护进程；
+守护进程自己的循环叫 `--follow`，argparse 直接拒收 ⇒ 开机自启动在第一次轮询之前就死掉，
+且因 `pythonw` 无控制台而**零可见症状**。其它模式标志（`--status/--launch/--probe`）都做了名称翻译，
+所以手工跑起来一切正常，坏的恰好是没人手工跑的那条。
+- **修复**：`entry.py` 把 `--watch` 映射为 `--follow`；公开名保持不变，Run 键与 `uninstall.ps1` 的匹配串无需改动。
+- **效果验证**：新增 `EntryCLITests` 把 `entry.py` 转发的标志交给**真实的** `watchdog.main` 解析——
+  两个文件各自持有 argparse，过去没有任何东西检查它们是否一致。
+  红/绿对照：旧转发串 `--watch` ⇒ `SystemExit 2 / unrecognized arguments`；新串 ⇒ `follow()` 被进入、rc=0。
+  现场以 `Start-Process pythonw entry.py --watch` 复跑，`--status` 的 `watchdog_pid` 由 **0 变为 44876**——
+  这是本仓库第一次观察到自启动路径真的把守护循环跑起来。
+
 ## 10. 安装与卸载的边界
 
 - `install.ps1`：探测解释器 → 建项目内 `.venv` → 装 `websocket-client`（官方 → 清华 → 阿里逐个回退，
@@ -301,3 +340,7 @@
 - `uninstall.ps1`：删 Run 键 → 停守护 → `__goatDispose()` → 删 `.venv`。`%LOCALAPPDATA%\GOATGauge\`
   默认保留，`-Purge` 才删。不碰宿主安装目录、不碰宿主 CSP、不碰用户快捷方式。
 - 两者都**不**创建/改写 Command Code 的快捷方式或开始菜单项；带端口启动是一条独立命令，是否使用由用户决定。
+- **Run 键里那条命令必须被证明"能解析"，而不是"写着对"**：`pythonw` 无控制台，argparse 报错等于静默死亡。
+  公开标志名（`--watch`）与守护进程内部标志名（`--follow`）之间的翻译是一张跨文件契约，
+  只能靠一条把两侧串起来的测试守住（`tests/test_watchdog.py::EntryCLITests`）。
+  验收判据是 `--status` 里 `watchdog_pid != 0`；看不到进程就当没启动。
