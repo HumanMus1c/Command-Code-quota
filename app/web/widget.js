@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "8";
+  const VERSION = "9";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
