@@ -115,6 +115,13 @@
 - **D-6 单位符号不进语言表**（`cr/h`、`tok/s`、`h`/`m`/`d`），两种语言下一致；标签不得与宿主已有标签撞名。
 - **D-7 吞吐归一口径**：生成速度按请求实际流式时长（`Σ duration_ms`）归一，**不是**首末记录墙钟跨度
   ——后者把空闲间隙算进分母，会低估一个量级。
+- **D-9 月份进度条的分母只能估、不能编**：宿主侧没有任何月度上限字段——`subscription` 只有
+  `planId/status/currentPeriodStart/currentPeriodEnd`，`credits` 只有余量与阈值，而
+  `listPlans/getLatestPlan/readPlan` 是 **agent 计划文件**（`{path,title,content,mtime}`），不是套餐。
+  取序为：① 本地服务从计费接口拿到的套餐上限；② 本计费周期内实测到的最大余量（以
+  `currentPeriodStart` 为界存 `localStorage` 的 `goat-gauge-period-v1`，跨期即重置）；③ 两者都没有时
+  退回"只显示余量、不画条"。月份胶囊的文本形态必须与 5h/周一致（`已用/上限` + 进度条 + 倒计时），
+  不得再出现"7.16 cr 剩余"这种另一种口径。
 - **D-8 诊断自述按账号隔离且不猜测**：`probe.json` 一类自述写入
   `%LOCALAPPDATA%\GOATGauge\<accountHash>\`，哈希 = `sha256(userId)` 前 12 位。哈希隔离
   **不等于匿名化**（同哈希可跨文件关联，不许在 README 里写成隐私声明）；确认不了当前账号时**不猜、不写、
