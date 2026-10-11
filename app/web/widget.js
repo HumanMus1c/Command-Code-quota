@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "9";
+  const VERSION = "10";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -148,6 +148,8 @@
     observer: null,
     resizer: null,
     mountedIn: null,
+    lastMarkup: "",
+    layoutWas: "full",
     // Spec A-5: each await below is checked against this generation, so a reply
     // that lands after a thread switch can never paint the previous conversation.
     generation: 0,
@@ -668,7 +670,16 @@
 
     const root = node.shadowRoot;
     const row = root.getElementById("row");
-    row.innerHTML = parts.join("");
+    // Only touch the DOM when the board actually changed: rewriting the row every
+    // poll destroyed and rebuilt every chip, restarted each bar's width transition
+    // from zero, and is what read as ghosting on the host.
+    const markup = parts.join("");
+    const unchanged = markup === state.lastMarkup && node.dataset.state === fresh.state &&
+      node.dataset.edit === (layout.editing ? "on" : "off");
+    state.lastMarkup = markup;
+    if (!unchanged) {
+      row.innerHTML = markup;
+    }
     node.dataset.state = fresh.state;
     node.dataset.edit = layout.editing ? "on" : "off";
     node.setAttribute("aria-label", L.aria);
@@ -758,10 +769,21 @@
    * and the editor always show the same set. */
   function fit(root, node) {
     const row = root.getElementById("row");
+    // Shedding is presentation only - a class, never a removal. Nodes stay put so
+    // an unchanged rebuild can be skipped, and widening hands the countdowns and
+    // bars straight back instead of waiting for the next full render.
+    for (const decoration of row.querySelectorAll(".cd, .bar")) {
+      decoration.classList.remove("shed");
+    }
     // Force the no-wrap state before measuring: scrollWidth is only an honest
     // "does it fit on one line" reading while the row is not already wrapping.
     node.dataset.layout = "full";
-    if (row.scrollWidth <= row.clientWidth + 1) {
+    const spare = row.clientWidth - row.scrollWidth;
+    // Staying on one line costs nothing; returning to it needs 12px of slack, so a
+    // width sitting on the boundary cannot oscillate between tiers.
+    const needed = state.layoutWas === "full" ? -1 : 12;
+    if (spare >= needed) {
+      state.layoutWas = "full";
       guardAgainstHost(node, row);
       return;
     }
@@ -773,6 +795,7 @@
         break;
       }
     }
+    state.layoutWas = node.dataset.layout;
     guardAgainstHost(node, row);
   }
 
@@ -784,10 +807,12 @@
    * every metric. Dropping whole chips here is what made the board show a
    * different set of metrics than the editor offers at the same width. */
   function shedOne(row) {
-    for (const decoration of [".cd", ".bar"]) {
-      const node = row.querySelector(decoration);
-      if (node) {
-        node.remove();
+    for (const selector of [".cd", ".bar"]) {
+      const pending = [...row.querySelectorAll(selector)].filter(
+        (decoration) => !decoration.classList.contains("shed")
+      );
+      if (pending.length) {
+        pending[0].classList.add("shed");
         return true;
       }
     }
@@ -909,6 +934,7 @@
 .chip.muted{opacity:.45}
 .chip.bad em{color:var(--goat-warn,#d97706)}
 .chip .cd{opacity:.62;font-size:10.5px}
+.cd.shed,.bar.shed{display:none}
 .bar{display:inline-block;width:30px;height:4px;border-radius:2px;overflow:hidden;
   background:color-mix(in srgb,currentColor 18%,transparent)}
 .bar>i{display:block;height:100%;border-radius:2px;background:var(--goat-accent,#7c5cf6);

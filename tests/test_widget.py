@@ -91,8 +91,8 @@ class El {
   get _naturalWidth() {
     // Bars and countdowns cost real width, otherwise the tier that sheds them
     // could never be observed.
-    return 30 + this.children.length * 50 +
-      this.querySelectorAll(".bar").length * 20 + this.querySelectorAll(".cd").length * 30;
+    const visible = (sel) => this.querySelectorAll(sel).filter((el) => !el.classList.contains("shed")).length;
+    return 30 + this.children.length * 50 + visible(".bar") * 20 + visible(".cd") * 30;
   }
   get _wrappedLike() {
     const host = this.parentElement && this.parentElement.host;
@@ -458,7 +458,7 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   const midWidget = findById(midWorld.doc.documentElement, "goat-gauge-widget");
   const midRow = midWidget.shadow.getElementById("row");
   const metricCount = () => midRow.children.filter((c) => c.attrs["data-metric"]).length;
-  const decorations = () => midRow.querySelectorAll(".cd").length + midRow.querySelectorAll(".bar").length;
+  const decorations = () => [...midRow.querySelectorAll('.cd, .bar')].filter((el) => !el.classList.contains('shed')).length;
 
   // Width must never change which metrics are on the board.
   const PUSH = () => mid.win.window.__goatUpdate({
