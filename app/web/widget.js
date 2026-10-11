@@ -1,13 +1,15 @@
 /*
  * GOAT Gauge widget — a compact usage readout injected above the Command Code
- * composer. Data comes from the host's own preload bridge (window.electronAPI)
- * and from derived metrics pushed in by the local injector (__goatUpdate).
- * No charts: parameters, numbers, and plain progress bars only.
+ * composer. Quota, credits and period totals come from the host's own preload
+ * bridge (window.electronAPI, whose calls answer an envelope); derived rate
+ * metrics may still be pushed in by the local service via __goatUpdate until
+ * they are sampled here instead. No charts: parameters, numbers, and plain
+ * progress bars only.
  */
 (() => {
   "use strict";
 
-  const VERSION = "2";
+  const VERSION = "3";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -380,6 +382,21 @@
 
   function now() {
     return Date.now() + state.serverOffset;
+  }
+
+  /* A composer that exists but is hidden is not an anchor: mounting into a
+   * collapsed pane yields a readout nobody can see and no error to explain it. */
+  function visible(element) {
+    if (!element || !element.isConnected) {
+      return false;
+    }
+    if (element.closest("[hidden],[inert]")) {
+      return false;
+    }
+    if (!element.getClientRects().length) {
+      return false;
+    }
+    return getComputedStyle(element).visibility !== "hidden";
   }
 
   function hostPayload(overview) {
@@ -858,19 +875,23 @@
     return node;
   }
 
-  /* Sit directly above the composer box, as a real sibling in its flex column. */
+  /* Sit directly above the composer box. The composer's four ancestors measure
+   * display:block on the live host, so this is a block sibling - the earlier
+   * flex-column requirement was inferred from a stale build and made every
+   * real mount return false without a single error. */
   function mount() {
     if (!document.documentElement) {
       return false;
     }
-    const composer = document.querySelector(".cc-composer") || null;
-    const editor = composer ? null : document.querySelector('textarea[rows="1"]');
-    const target = composer || nearestColumnChild(editor);
-    if (!target || !target.parentElement) {
+    const composers = [...document.querySelectorAll(".cc-composer")].filter(visible);
+    if (composers.length !== 1) {
+      // Zero means the composer is not built yet; more than one means we cannot
+      // tell which one owns this row. Guessing is not a fallback.
       return false;
     }
+    const target = composers[0];
     const parent = target.parentElement;
-    if (getComputedStyle(parent).display.indexOf("flex") === -1) {
+    if (!parent) {
       return false;
     }
     const existing = document.getElementById(ID);
@@ -888,19 +909,6 @@
     return true;
   }
 
-  function nearestColumnChild(editor) {
-    let node = editor;
-    while (node && node.parentElement) {
-      const parent = node.parentElement;
-      if (getComputedStyle(parent).display.indexOf("flex") !== -1 &&
-          getComputedStyle(parent).flexDirection === "column") {
-        return node;
-      }
-      node = parent;
-    }
-    return null;
-  }
-
   async function pullHost() {
     const api = window.electronAPI;
     if (!api || typeof api.accountOverview !== "function") {
@@ -909,12 +917,21 @@
       return;
     }
     try {
-      const overview = await api.accountOverview();
-      if (overview && typeof overview === "object") {
+      const reply = await api.accountOverview();
+      // Every bridge call answers an envelope ({success, overview}); treating the
+      // envelope as the payload leaves every field undefined while the object
+      // check still passes - a readout that shows nothing and reports no error.
+      const overview =
+        reply && typeof reply === "object" && "success" in reply ? reply.overview : reply;
+      if (reply && typeof reply === "object" && reply.success === false) {
+        state.host = null;
+        state.hostError = "unsuccessful";
+      } else if (overview && typeof overview === "object") {
         state.host = overview;
         state.hostAt = Date.now();
         state.hostError = "";
       } else {
+        state.host = null;
         state.hostError = "empty";
       }
     } catch (error) {

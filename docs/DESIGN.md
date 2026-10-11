@@ -225,15 +225,21 @@
 1. ~~Electron 43.3.0 是否接受 `--remote-debugging-port`~~ —— **已验证（2026-10-11 真机）**：接受，
    `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1` 启动后 1.5 秒生成 `DevToolsActivePort`，
    实测随机端口 5980，且 `netstat` 归属校验判定为 `Command Code.exe`。握手另需 N-8 的免 Origin 规则。
-2. 线上 DOM 的锚点存在性 —— **已验证（只读普查，未注入）**：四个锚点各 1 个、无非可编辑伪输入框、文档是 `file:`。
-   仍未验证的是**挂载本身**（真机 `__goatProbe()` 回读 `mounted=true`），且普查新推翻了 flex 列前提（见 §1
-   宿主容器几何），插入方式必须按块流重做后才能谈挂载验收。
+2. 线上 DOM 的锚点与挂载 —— **已验证（真机注入 + `__goatProbe()` 回读，2026-10-11）**：
+   `mounted=true`、`host=true`、`layout=full`、`state=live`；块流兄弟插入成立
+   （读数条 848×28 位于 `top=689`，`.cc-composer` 起于 `top=717`，`overlaps=false`）；
+   额度三窗、请求数、TOKEN、费用、均价共 7 项按真值渲染（实测上限 5h=3、周=6）。
+   速度类胶囊**缺席**而非显示 0，符合 D-2；它们要等自采样实现（见 §4 D-7 与 §9.5）。
 3. ~~三个接口的真实返回结构~~ —— **已验证**，见 §1 的信封与字段行。由此得到两条硬约束：
    `sessionStats` 没有任何时长字段 ⇒ 速度类指标只能靠**读数条自行采样**（D-2 要求样本不足时显示不可用而不是 0）；
    `sessionContextBreakdown` 对当前线程报错 ⇒ 不得作为数据源。
-4. **新证实的缺陷**：`widget.js:912` 把信封本身存进 `state.host`，`:386` 再读 `overview.windowLimits` 得 undefined，
-   而 `hostError` 因为"信封是非空对象"被判为空 ⇒ **真机上读数条一条指标都不出且零报错**。
-   这条必须在 D2 改造里连带修掉，并在夹具里加"信封非空但剥壳后为空"的用例。
+4. ~~`widget.js` 把信封本身存进 `state.host`~~ —— **已修**（连同 `mount()` 里"display 不是 flex 就拒绝挂载"
+   这第二个静默失效一起；后者使真机永远挂不上且零报错）。工装同步补了三条用例：信封必须读出额度、
+   不可见的 composer 不算锚点、两个可见 composer 时一律不挂载。
+5. 尚未落地的条款（本轮只做了信封 / 块流 / 歧义 / 可见性 / 无假零）：**A-5 请求代次**、
+   **N-5 命中测试与 `inert`+`aria-hidden`**、**P-7 布局指纹**、**P-8 无障碍语义**、
+   **D-7 的速度类指标需读数条自采样**（宿主不报任何时长，`sessionContextBreakdown` 对当前线程报错，
+   所以 `tok/s` 与 `cr/h` 只能用 `windowLimits.*.used` 与 `tokens.output` 的时间差分，warm-up 期显示不可用）。
 4. 任何"注入成功"的结论必须先有真机 `__goatProbe()`（`widget.js:1004`）回读 `mounted` 为真。
 5. **默认验证路径是免重启的同源夹具** `app/web/widget-preview.html`：复刻宿主 composer 的 DOM 与主题变量、
    mock `electronAPI`，加载**同一份** `app/web/widget.js`。绝不为验证而重启用户正在使用的 Command Code；

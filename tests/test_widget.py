@@ -146,6 +146,20 @@ class El {
   set textContent(v) { this._text = String(v); }
   get textContent() { return this._text; }
   getBoundingClientRect() { return this.rect; }
+  getClientRects() { return this.rect ? [this.rect] : []; }
+  get isConnected() {
+    let node = this;
+    while (node.parentElement) node = node.parentElement;
+    return node.tagName === "HTML" || Boolean(node.host);
+  }
+  closest(sel) {
+    let node = this;
+    while (node) {
+      if (matches(node, sel)) return node;
+      node = node.parentElement || (node.host && node.host.parentElement) || null;
+    }
+    return null;
+  }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
   querySelectorAll(sel) {
     const out = [];
@@ -204,6 +218,17 @@ function makeDoc(lang) {
         return null;
       };
       return walk(root);
+    },
+    querySelectorAll(sel) {
+      const out = [];
+      const walk = (node) => {
+        for (const child of node.children) {
+          if (matches(child, sel)) out.push(child);
+          walk(child);
+        }
+      };
+      walk(root);
+      return out;
     },
     addEventListener: () => {},
   };
@@ -268,8 +293,9 @@ function run(env) {
     setTimeout: (fn, ms) => { timers.push(["timeout", fn, ms]); return timers.length; },
     clearTimeout: () => {},
     getComputedStyle: (element) => ({
-      display: "flex",
+      display: (element && element._display) || "flex",
       flexDirection: "column",
+      visibility: (element && element._visibility) || "visible",
       getPropertyValue: (name) => (env && env.tokens ? env.tokens[name] || "" : ""),
       _el: element,
     }),
@@ -727,6 +753,49 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     afterCommit.join(","));
   check("commit: rendered metrics took the dragged order",
     afterCommit.indexOf("cache") < afterCommit.indexOf("five"), afterCommit.join(","));
+
+  // ---- host contract: the bridge answers an envelope, and only a visible,
+  // unambiguous composer is an anchor (both were proven against the live host) ----
+  const boxed = composerDoc();
+  const envelopeRun = run({
+    doc: boxed.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  await envelopeRun.fire("timeout");
+  await tick();
+  const boxedWidget = findById(boxed.doc.documentElement, "goat-gauge-widget");
+  const boxedRow = boxedWidget && boxedWidget.shadow.getElementById("row").innerHTML;
+  check("envelope: mounts from a {success, overview} reply", boxedWidget);
+  check("envelope: quota reads through the envelope", /5h/.test(boxedRow || ""), String(boxedRow).slice(0, 70));
+
+  const hiddenWorld = composerDoc();
+  hiddenWorld.composer._visibility = "hidden";
+  const hiddenRun = run({
+    doc: hiddenWorld.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  await hiddenRun.fire("timeout");
+  await tick();
+  hiddenRun.fireHeartbeat();
+  await tick();
+  check("visibility: a hidden composer is not an anchor",
+    !findById(hiddenWorld.doc.documentElement, "goat-gauge-widget"));
+
+  const twinWorld = composerDoc();
+  const twin = new El("div");
+  twin.className = "cc-composer";
+  twin.append(new El("div"));
+  twinWorld.feed.append(twin);
+  const twinRun = run({
+    doc: twinWorld.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  await twinRun.fire("timeout");
+  await tick();
+  twinRun.fireHeartbeat();
+  await tick();
+  check("ambiguity: two visible composers mount nothing rather than guess",
+    !findById(twinWorld.doc.documentElement, "goat-gauge-widget"));
 
   const failed = results.filter((r) => !r.ok);
   for (const r of results) {

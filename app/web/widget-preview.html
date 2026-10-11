@@ -38,7 +38,12 @@
     .messages { flex: 1; overflow: auto; padding: 18px 0; }
     .msg { max-width: 48rem; margin: 0 auto 14px; padding: 0 1rem; color: var(--ink-subtle); }
     .msg.me { color: var(--foreground); }
-    .cc-composer { width: 100%; flex: none; }
+    /* Measured on the live host: .cc-composer's parent chain is block flow
+       (mx-auto w-full max-w-4xl px- -> shrink-0 pb-2 pt-2), NOT a flex column.
+       The fixture has to match, otherwise it green-lights a mount that the real
+       composer geometry rejects. */
+    .cc-composer-host { display: block; width: 100%; max-width: 56rem; margin: 0 auto; padding: 0 1rem; flex: none; }
+    .cc-composer { display: block; width: 100%; }
     .cc-composer-surface {
       position: sticky; bottom: 0; z-index: 1; overflow: hidden;
       border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
@@ -99,18 +104,20 @@
       <div><output>Weekly limit · 85% used</output></div>
     </div>
 
-    <div class="cc-composer">
-      <div class="cc-composer-surface">
-        <span class="notice" id="push-note">等待本机服务推送派生指标…</span>
-        <textarea rows="1" aria-label="Message Command Code" placeholder="Message Command Code"></textarea>
-        <div class="cc-composer-toolbar">
-          <div class="left">
-            <span class="cc-composer-model">deepseek/deepseek-v4.1-flash</span>
-            <span class="cc-composer-permission">Ask before edit</span>
-          </div>
-          <div class="right">
-            <span class="cc-composer-effort">High effort</span>
-            <button class="send" type="button" title="Send">↑</button>
+    <div class="cc-composer-host">
+      <div class="cc-composer">
+        <div class="cc-composer-surface">
+          <span class="notice" id="push-note">等待本机服务推送派生指标…</span>
+          <textarea rows="1" aria-label="Message Command Code" placeholder="Message Command Code"></textarea>
+          <div class="cc-composer-toolbar">
+            <div class="left">
+              <span class="cc-composer-model">deepseek/deepseek-v4.1-flash</span>
+              <span class="cc-composer-permission">Ask before edit</span>
+            </div>
+            <div class="right">
+              <span class="cc-composer-effort">High effort</span>
+              <button class="send" type="button" title="Send">↑</button>
+            </div>
           </div>
         </div>
       </div>
@@ -137,7 +144,13 @@
       },
     };
     window.electronAPI = {
-      accountOverview: async () => JSON.parse(JSON.stringify(OVERVIEW)),
+      // The bridge answers an envelope, never the bare payload. A fixture that
+      // returns OVERVIEW directly proves nothing about the real code path.
+      accountOverview: async () => ({ success: true, overview: JSON.parse(JSON.stringify(OVERVIEW)) }),
+      getAppState: async () => ({
+        success: true,
+        state: { activeThreadId: "fixture-thread", model: "deepseek/deepseek-v4.1-flash" },
+      }),
     };
 
     // Same-origin fetch of the real local service; the production path pushes the
