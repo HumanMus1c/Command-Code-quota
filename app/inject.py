@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-WIDGET_VERSION = "7"
+WIDGET_VERSION = "8"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
 MAX_PORT_FILE_BYTES = 1024
 MAX_TARGETS_BYTES = 1_000_000
@@ -466,6 +466,10 @@ def build_payload(service: Any) -> dict[str, Any]:
         # The widget drops any payload whose version does not match, so the tag
         # belongs here rather than in whichever caller remembers to add it.
         "version": WIDGET_VERSION,
+        # Synthetic and real numbers must never be indistinguishable on the host:
+        # a demo payload that silently replaces a live one is how a 70-credit
+        # synthetic pool ended up read as the account's real ceiling.
+        "mode": live.get("mode") or ("demo" if getattr(service, "demo", False) else "live"),
         "server_time": live.get("server_time"),
         "host": live.get("host") or {},
         "rates": live.get("rates") or {},

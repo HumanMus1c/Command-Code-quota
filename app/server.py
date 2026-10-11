@@ -811,6 +811,7 @@ class GaugeService:
                 "last_error": last_error,
                 "usage_error": usage_error,
             },
+            "mode": "demo" if self.demo else "live",
             "rates": rates,
             "projections": projections,
             "host": {"theme": self.host_theme},
@@ -1357,7 +1358,7 @@ def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False) ->
         from .watchdog import claim_inject_lock
 
         profile = commandcode_profile_dir()
-        claim = claim_inject_lock()
+        claim = claim_inject_lock(mode="demo" if demo else "live")
         if claim is None:
             # The port tells us nothing about who is injecting; a second
             # registration would fight the first one for the same slot.

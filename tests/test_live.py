@@ -173,6 +173,15 @@ class ActivityRateTestCase(LiveTestCaseBase):
             "status": "completed",
         }
 
+    def test_live_payload_declares_its_mode(self) -> None:
+        # Distinguishing synthetic from real must be machine-readable, not inferred.
+        self.assertEqual(self.service.live()["mode"], "live")
+        demo = GaugeService(demo=True)
+        try:
+            self.assertEqual(demo.live()["mode"], "demo")
+        finally:
+            demo.store.close()
+
     def test_no_cache_buckets_report_no_hit_rate(self) -> None:
         # Absence is not a measured 0.0%: the readout must drop the chip.
         self.assertIsNone(self.service.live()["rates"]["hit_rate_pct"])

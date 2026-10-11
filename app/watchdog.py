@@ -18,6 +18,7 @@ import re
 import subprocess
 import tempfile
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -480,17 +481,32 @@ INJECT_LOCK_NAME = "inject.lock"
 
 
 def claim_inject_lock(
-    *, alive: Callable[[int], bool] = pid_alive
+    *, mode: str = "live", alive: Callable[[int], bool] = pid_alive
 ) -> tuple[Path, str] | None:
-    """Gate the DevTools registration to a single process.
+    """Gate the DevTools registration to a single process, and record what it is.
 
     The HTTP port cannot serve as the mutex: an instance that fails to bind it
     still runs its injector thread, so N instances end up each registering the
-    readout and pushing their own numbers over one another.
+    readout and pushing their own numbers over one another. The mode travels with
+    the claim so synthetic data can never quietly replace a real reading.
     """
     path = runtime_dir() / INJECT_LOCK_NAME
+    current = read_json(path)
+    if current:
+        try:
+            owner = int(current.get("pid") or -1)
+        except (TypeError, ValueError):
+            owner = -1
+        if alive(owner):
+            return None
+        if str(current.get("mode") or "") == "live" and mode == "demo":
+            return None
     token = uuid.uuid4().hex
-    return (path, token) if acquire_lock(path, token=token, pid=os.getpid(), alive=alive) else None
+    write_json_atomic(
+        path,
+        {"pid": os.getpid(), "token": token, "mode": mode, "started_at": round(time.time(), 3)},
+    )
+    return path, token
 
 
 def release_inject_lock(claim: tuple[Path, str] | None) -> None:
@@ -498,16 +514,44 @@ def release_inject_lock(claim: tuple[Path, str] | None) -> None:
         release_lock(claim[0], token=claim[1])
 
 
+def gauge_report(port: int = 18927, *, timeout: float = 2.0) -> dict[str, Any]:
+    """Ask the port owner which mode it is serving, instead of inferring it.
+
+    Guessing from a PID list is what let a synthetic 70-credit pool be read as
+    the account's real ceiling; the endpoint states it outright.
+    """
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(
+            urllib.request.Request(f"http://127.0.0.1:{port}/api/state"), timeout=timeout
+        ) as response:
+            payload = json.loads(response.read(4_194_304).decode("utf-8", errors="replace"))
+    except Exception as exc:  # noqa: BLE001 - a diagnostic never raises
+        return {"port": port, "reachable": False, "error": type(exc).__name__}
+    meta = payload.get("meta") or {}
+    return {
+        "port": port,
+        "reachable": True,
+        "mode": "demo" if meta.get("demo") else "live",
+        "configured": bool(payload.get("configured")),
+        "key_source": str(meta.get("key_source") or ""),
+    }
+
+
 def status(*, profile: Path | None = None, capture: Callable[[list[str]], str] = _capture) -> dict[str, Any]:
     profile = profile or commandcode_profile_dir()
     port = devtools_port(profile)
     lock = read_json(runtime_dir() / LOCK_NAME) or {}
+    inject_lock = read_json(runtime_dir() / INJECT_LOCK_NAME) or {}
     owner = host_listener(port, capture=capture)
     return {
         "host_processes": host_processes(capture=capture),
         "debug_port": port or 0,
         "port_owner_is_host": bool(owner),
         "watchdog_pid": int(lock.get("pid") or 0) if pid_alive(int(lock.get("pid") or -1), capture=capture) else 0,
+        "inject_mode": str(inject_lock.get("mode") or ""),
+        "inject_pid": int(inject_lock.get("pid") or 0) if pid_alive(int(inject_lock.get("pid") or -1), capture=capture) else 0,
+        "gauge": gauge_report(),
         "widget_source": str(Path(__file__).resolve().parent / "web" / "widget.js"),
     }
 

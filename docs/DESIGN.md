@@ -122,6 +122,13 @@
   `currentPeriodStart` 为界存 `localStorage` 的 `goat-gauge-period-v1`，跨期即重置）；③ 两者都没有时
   退回"只显示余量、不画条"。月份胶囊的文本形态必须与 5h/周一致（`已用/上限` + 进度条 + 倒计时），
   不得再出现"7.16 cr 剩余"这种另一种口径。
+- **D-11 演示与真实必须可机读区分**：`--demo` 的合成池与真实计费池曾在同一个 18927 端口上
+  无法分辨，直接导致把合成的 `cap:70` 当成账户真实上限、把三轮诊断绕完才回头。现在：
+  `live()` 输出 `mode: "live"|"demo"`，注入 payload 透传同一个字段，读数条把它写进指纹
+  （`src=push:demo` 与 `src=push:live` 可分辨），`entry.py --status` 直接回读端口持有者的
+  `gauge.mode` 与 `inject_mode`，不必再靠时间戳猜。注入锁记录持有者的模式，
+  **演示实例不得取代真实实例的锁**（真实实例死后也一样）。未标 `mode` 的 payload
+  在指纹里记成 `push:unknown`，不得默认当作真实数据。
 - **D-8 诊断自述按账号隔离且不猜测**：`probe.json` 一类自述写入
   `%LOCALAPPDATA%\GOATGauge\<accountHash>\`，哈希 = `sha256(userId)` 前 12 位。哈希隔离
   **不等于匿名化**（同哈希可跨文件关联，不许在 README 里写成隐私声明）；确认不了当前账号时**不猜、不写、

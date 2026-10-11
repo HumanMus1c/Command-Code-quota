@@ -146,6 +146,22 @@ class DiscoveryTestCase(unittest.TestCase):
             discover_targets(9333)
 
 
+class PayloadModeTestCase(unittest.TestCase):
+    def test_build_payload_carries_the_service_mode(self) -> None:
+        class Service:
+            def live(self):
+                return {"mode": "demo", "rates": {}, "projections": {}, "monthly": {}, "host": {}, "fresh": {}}
+
+        self.assertEqual(inject.build_payload(Service())["mode"], "demo")
+
+    def test_unlabelled_payload_is_not_assumed_live(self) -> None:
+        class Service:
+            def live(self):
+                return {"rates": {}, "projections": {}, "monthly": {}, "host": {}, "fresh": {}}
+
+        self.assertEqual(inject.build_payload(Service())["mode"], "live")
+
+
 class SourceWrappingTestCase(unittest.TestCase):
     def test_guard_checks_origin_and_version(self) -> None:
         wrapped = guarded_source("void 0;", make_target())

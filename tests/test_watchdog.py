@@ -143,6 +143,25 @@ class InjectLockTests(unittest.TestCase):
         watchdog.release_inject_lock(again)
 
 
+class InjectModeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp(prefix="goat-injectmode-"))
+        environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def test_demo_never_replaces_a_live_owner_even_after_it_dies(self) -> None:
+        lock = watchdog.runtime_dir() / watchdog.INJECT_LOCK_NAME
+        watchdog.write_json_atomic(lock, {"pid": 9999, "token": "dead", "mode": "live"})
+        dead = mock.Mock(return_value=False)
+        self.assertIsNone(watchdog.claim_inject_lock(mode="demo", alive=dead))
+        self.assertEqual(watchdog.read_json(lock)["mode"], "live")
+        claim = watchdog.claim_inject_lock(mode="live", alive=dead)
+        self.assertIsNotNone(claim)
+        self.assertEqual(watchdog.read_json(lock)["mode"], "live")
+        watchdog.release_inject_lock(claim)
+
+
 class FakeInjector:
     def __init__(self, **kwargs) -> None:
         self.count = 0

@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "7";
+  const VERSION = "8";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -139,6 +139,7 @@
     hostError: "",
     pushed: null,
     pushedAt: 0,
+    pushedMode: "",
     serverOffset: 0,
     timer: null,
     polling: false,
@@ -1349,6 +1350,7 @@
     }
     state.pushed = payload;
     state.pushedAt = Date.now();
+    state.pushedMode = payload.mode === "demo" ? "demo" : payload.mode === "live" ? "live" : "unknown";
     if (isFinite(payload.server_time)) {
       state.serverOffset = payload.server_time - Date.now();
     }
@@ -1380,7 +1382,7 @@
       node.inert ? "inert" : "live",
       board,
       `w${measured}xh${height}`,
-      `src=${state.pushed ? "push" : "-"}+${state.host ? "host" : "-"}+${isFinite(burn) ? "sample" : "-"}` +
+      `src=${state.pushed ? "push:" + state.pushedMode : "-"}+${state.host ? "host" : "-"}+${isFinite(burn) ? "sample" : "-"}` +
       `+${(() => { const host = state.host ? hostPayload(state.host) : null; const m = host && monthlyMeter(host); return m ? "m" + m.source : "m-"; })()}`,
     ].join("|");
   }
