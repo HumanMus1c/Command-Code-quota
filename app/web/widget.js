@@ -1222,6 +1222,9 @@
         state.statsAt = 0;
         state.samples = state.samples.slice(-1);
         state.generation = generation + 1;
+        // Quota already arrived in this pass; without this the board would sit on
+        // "waiting" for another whole poll cycle after every thread switch.
+        render();
         return;
       }
       if (state.threadId && typeof api.sessionStats === "function") {
