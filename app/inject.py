@@ -282,6 +282,11 @@ class WidgetInjector:
                     self.last_error = str(exc)
                     self.log(f"attach failed for {page_id}: {exc}")
 
+    def attached(self) -> int:
+        """How many pages hold a live session right now."""
+        with self._lock:
+            return len(self._sessions)
+
     def _alive(self, page_id: str) -> bool:
         probe = self.evaluate(
             page_id,
