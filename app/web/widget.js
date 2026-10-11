@@ -356,6 +356,33 @@
     );
   }
 
+  /* Every write is guarded: an unchanged poll must not touch the DOM at all.
+   * Unconditional dataset/attribute writes each queue a mutation record even when
+   * the value is identical, and that steady drip is what reads as a flicker. */
+  function setData(element, name, value) {
+    if (element.dataset[name] !== value) {
+      element.dataset[name] = value;
+    }
+  }
+
+  function setAttr(element, name, value) {
+    if (element.getAttribute(name) !== value) {
+      element.setAttribute(name, value);
+    }
+  }
+
+  function removeAttr(element, name) {
+    if (element.hasAttribute(name)) {
+      element.removeAttribute(name);
+    }
+  }
+
+  function setFlag(element, name, on) {
+    if (element.classList.contains(name) !== on) {
+      element.classList.toggle(name, on);
+    }
+  }
+
   function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
   }
@@ -680,14 +707,14 @@
     if (!unchanged) {
       row.innerHTML = markup;
     }
-    node.dataset.state = fresh.state;
-    node.dataset.edit = layout.editing ? "on" : "off";
-    node.setAttribute("aria-label", L.aria);
+    setData(node, "state", fresh.state);
+    setData(node, "edit", layout.editing ? "on" : "off");
+    setAttr(node, "aria-label", L.aria);
     state.langTag = String((document.documentElement || {}).lang || "");
     state.themeTag = themeSignature();
     applyTheme(node);
     if (layout.editing) {
-      node.dataset.layout = "editing";
+      setData(node, "layout", "editing");
     } else {
       fit(root, node);
     }
@@ -739,7 +766,7 @@
       const fallback = entry[3] && dark ? entry[3] : entry[2];
       node.style.setProperty(entry[0], usableColor(value, fallback));
     }
-    node.dataset.dark = dark ? "1" : "0";
+    setData(node, "dark", dark ? "1" : "0");
   }
 
   function freshness() {
@@ -777,7 +804,7 @@
     }
     // Force the no-wrap state before measuring: scrollWidth is only an honest
     // "does it fit on one line" reading while the row is not already wrapping.
-    node.dataset.layout = "full";
+    setData(node, "layout", "full");
     const spare = row.clientWidth - row.scrollWidth;
     // Staying on one line costs nothing; returning to it needs 12px of slack, so a
     // width sitting on the boundary cannot oscillate between tiers.
@@ -787,11 +814,11 @@
       guardAgainstHost(node, row);
       return;
     }
-    node.dataset.layout = "wrapped";
+    setData(node, "layout", "wrapped");
     while (row.scrollHeight > row.clientHeight + 1) {
       if (!shedOne(row)) {
         // Nothing left to shed but the budget; grow instead of dropping data.
-        node.dataset.layout = "tall";
+        setData(node, "layout", "tall");
         break;
       }
     }
@@ -901,14 +928,16 @@
       }
     }
     if (blocked) {
-      node.dataset.layout = "blocked";
+      setData(node, "layout", "blocked");
       // visibility:hidden alone still lets a screen reader speak the bar and Tab
       // still walks into it, which is the opposite of "not present".
-      node.inert = true;
-      node.setAttribute("aria-hidden", "true");
-    } else {
+      if (node.inert !== true) {
+        node.inert = true;
+      }
+      setAttr(node, "aria-hidden", "true");
+    } else if (node.inert !== false) {
       node.inert = false;
-      node.removeAttribute("aria-hidden");
+      removeAttr(node, "aria-hidden");
     }
   }
 
@@ -1122,7 +1151,7 @@
     const node = document.createElement("div");
     node.id = ID;
     node.setAttribute("role", "group");
-    node.setAttribute("aria-label", locale().aria);
+    setAttr(node, "aria-label", locale().aria);
     const root = node.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = STYLE;

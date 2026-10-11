@@ -69,6 +69,8 @@ class El {
   setAttribute(k, v) { this.attrs[k] = String(v); if (k === "id") this.id = String(v); }
   removeAttribute(k) { delete this.attrs[k]; if (k === "id") this.id = ""; }
   getAttribute(k) { return this.attrs[k]; }
+  hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); }
+  removeAttribute(k) { delete this.attrs[k]; }
   append(...nodes) { for (const n of nodes) { n.parentElement = this; this.children.push(n); } }
   insertBefore(node, ref) {
     const index = ref ? this.children.indexOf(ref) : this.children.length;
