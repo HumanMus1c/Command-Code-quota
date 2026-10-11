@@ -251,7 +251,17 @@
      （守护进程每 2.5 秒 reconcile 一次，等于必然触发）；锁改为可重入。
    - `WidgetInjector.evaluate()` 把 `awaitPromise` 写死为 `false` ⇒ 任何异步表达式只拿到 Promise 句柄
      （表现为"返回空对象"），跨进程诊断必须直连 `CdpConnection` 并显式 await。
-6. 仍开着的口子：**命中率胶囊在真机上未出现**。同页直连测得 `sessionStats` 返回
+6. **单实例复测已通过（2026-10-11 22:4x，`docs` 更新）**：只保留一个服务实例后，
+   `inject.lock` 的 pid 与 18927 端口的持有者**是同一个进程**，`live.rates.hit_rate_pct = null`，
+   页面上 `cache/gen/rate` 三颗胶囊缺席、**没有画出"命中 0.0%"**；月份胶囊为
+   `Month 2.84/10` + `aria-valuenow/max = 2.84/10`，与 `live.monthly = {cap:10, remaining:7.158}`
+   逐项吻合（`used = cap - remaining`），指纹尾部 `mplan` 记下来自套餐池；`burn 0.00 cr/h`
+   来自自采样（指纹含 `sample`），宿主端口 10316 归属校验为真。
+   上一轮把 `cap:70` 当作权威上限是错的：那是遗留 `--demo` 实例的合成池；真实账号月度池就是 10。
+   另记一条判据教训：`.venv\Scripts\pythonw.exe` 是 PEP 733 重定向壳，一次启动必然产生
+   壳 + `C:\Python\Python313\python.exe` 两个 PID，**按命令行数进程会把 1 个实例误读成 2 个**，
+   要按 `ExecutablePath` 区分。
+7. 曾经开着的口子：命中率胶囊在真机上未出现。同页直连测得 `sessionStats` 返回
    `{success:true, stats:{branches,contextUsage,messages,tokens{input,output,cacheRead,cacheWrite}}}`
    且 `session=known`，所以通道没问题；两种候选解释是当前会话的 token 计数为 0（分母为 0 ⇒ 按 D-2 正确地不出胶囊）
    或 `stats` 拉取时机。**未定性之前不得声称命中率已跑通**，下一步用 `probe.statsAt` 区分这两者。
