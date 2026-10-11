@@ -278,6 +278,14 @@
    mock `electronAPI`，加载**同一份** `app/web/widget.js`。绝不为验证而重启用户正在使用的 Command Code；
    需要真机时把重启那一步交给用户点的脚本。
 
+**未解缺陷（2026-10-11 深夜，根因已定位到源码，修复未完成）**：`/api/quit` 答应退出却不退出。
+`GaugeService.request_stop()` 只调用 `self._stop_callback()`，而 `run_foreground` **从未安装该回调**
+⇒ 整条 quit 路径是空操作。我先前把它归因于等待循环（`b5a5f97` 改成检查 `stop_event`）——必要但
+**不充分**，绿测仍失败；也猜过 `request_stop` 不存在——错（`server.py:1070` 就在）。正确修法：
+在 `run_foreground` 里把回调接上（让它设置 `_stop_event`，注入线程与等待循环随之退出、锁随之释放），
+并加一条真机回归"quit 之后 entry.py 进程数必须为 0"。**在完成之前，不要把 `/api/quit` 当作可用的停止手段**
+（现场停用请用强杀 + 锁的存活判定，它已验证能正确接管陈旧锁）。
+
 ## 10. 安装与卸载的边界
 
 - `install.ps1`：探测解释器 → 建项目内 `.venv` → 装 `websocket-client`（官方 → 清华 → 阿里逐个回退，
