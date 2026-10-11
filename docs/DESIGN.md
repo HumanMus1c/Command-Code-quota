@@ -21,7 +21,12 @@
 | 页面 CSP | `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-zrvkeKAHvjk8g+o0GV59i098Rz4hc1p5vZJqJBHNJBU='; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'` | `out/renderer/index.html` \[实测\] |
 | Trusted Types | CSP **不含** `require-trusted-types-for` ⇒ 宿主未强制 Trusted Types | \[实测\] |
 | 官方扩展面 | `~/.commandcode/mcp.json`（MCP，即 Model Context Protocol 模型上下文协议）与 CLI `config.json`（实测顶层键仅 `featureModels/reasoningEffort/starredModels`）；**无** `contributes`、无 `out/cli.js`、`statusline` 命中全是 agent 输出解析与 Discord 文案 | \[实测\] |
-| 数据桥 | `window.electronAPI`：`accountOverview(options)` / `sessionStats(sessionId)` / `sessionContextBreakdown(sessionId)`，通道名 `account-overview`/`session-stats`/`session-context-breakdown` | `out/preload/index.js`、`out/main/index.js` \[静态\] |
+| 数据桥 | `window.electronAPI`：`accountOverview(options)` / `sessionStats(sessionId)` / `sessionContextBreakdown(sessionId)` / `getAppState()`，通道名 `account-overview`/`session-stats`/`session-context-breakdown` | `out/preload/index.js`、`out/main/index.js` \[静态\]，方法均可调用 \[实测\] |
+| **接口信封** | 每次调用返回的是信封而不是裸对象：`accountOverview → {success, overview}`、`getAppState → {success, state}`、`sessionStats → {success, stats}`、失败为 `{success:false, error:string}`。**不剥壳就恒得 undefined** | `--probe` 真机回读 \[实测\] |
+| `overview` 字段 | `user{id,name,email,userName,org?}` · `identity{kind,name,login,image}` · `credits{monthlyCredits,purchasedCredits,freeCredits,belowThreshold,creditThreshold,availableCredits?}` · `subscription{planId,status,currentPeriodStart,currentPeriodEnd}` · `usage{totalCount,completedCount,failedCount,totalTokens,totalTokensIn,totalTokensOut,totalCredits,totalCost,averageCost,successRate,models[]}` · `windowLimits{limited,exceeded,fiveHour{used,cap,exceeded,resetAt:number(ms)},weekly{同}}` | \[实测\] |
+| `stats` 字段 | `sessionStats(threadId) → {branches:number, messages:number, contextUsage{current,limit}, tokens{input,output,cacheRead,cacheWrite}}` ⇒ **没有任何时长或时间戳字段**，命中率可由 `cacheRead/(input+cacheRead)` 算，tok/s 与 cr/h **不能由单次宿主调用得出** | \[实测\] |
+| `sessionContextBreakdown` | 对当前活动线程返回 `{success:false, error:string}` ⇒ 不可依赖 | \[实测，仅此一线程\] |
+| CDP 握手 | Chromium 150 拒绝**带 Origin** 的 WebSocket 升级（403，并提示加 `--remote-allow-origins`）。正确解法是**不发 Origin**（`websocket-client` 的 `suppress_origin=True`），加那个开关等于把端口让给本机任意网页进程 | \[实测\] |
 | 界面锚点 | `.cc-composer-surface` > `.cc-composer` > `.cc-composer-toolbar` > 其内 `textarea[rows="1"]`；路径上无 `data-testid` | 构建产物 \[静态\]，线上 DOM \[未验证\] |
 | 语言 | i18next 单命名空间 `desktop`，`supportedLngs:["en","zh"]`，`fallbackLng:"en"`；切语言改写 `<html lang>`（zh → `zh-Hans`） | \[静态\] |
 | 主题 | `<html data-theme>`（`light\|dark\|purple\|purple-dark`）+ `classList.toggle('dark', theme!=='light')` | \[静态\] |
@@ -62,6 +67,9 @@
   `webSocketDebuggerUrl`（`inject.py:120`）。
 - **N-7 卸载即无痕**：`__goatDispose()` 移除节点、观察器与定时器；`Page.removeScriptToEvaluateOnNewDocument`
   注销预加载。注册归属发起它的 socket，故守护进程退出后不会在后续导航中复活。
+- **N-8 DevTools 握手必须不带 Origin**：Chromium 150 对携带 Origin 的 WebSocket 升级回 403。
+  解法是 `websocket.create_connection(..., suppress_origin=True)`（`inject.py:148`），
+  **禁止**改用 `--remote-allow-origins=*` 或按端口白名单放行——那等于把宿主窗口交给本机任意网页进程脚本化。
 
 ## 3. 锚点与歧义
 
@@ -109,6 +117,9 @@
   `%LOCALAPPDATA%\GOATGauge\<accountHash>\`，哈希 = `sha256(userId)` 前 12 位。哈希隔离
   **不等于匿名化**（同哈希可跨文件关联，不许在 README 里写成隐私声明）；确认不了当前账号时**不猜、不写、
   不读别的账号目录**，离线启动也无法确认就整段跳过（上游同一立场：`docs/ROBUSTNESS.md:125,127`）。
+  **键名本身可能就是标识符**——实测 `getAppState().state.deletedThreads` 是以线程 ID 为键的 map，
+  逐键列出自述会把 13 个 ID 写上磁盘。所以自述必须做键归一：不符合 `^[A-Za-z][A-Za-z0-9]{0,24}$`
+  的键、或键数超过 20 的对象，只输出 `{__map__: 数量, __value__: 值类型}`，不输出键名。
 
 ## 5. 生命周期（守护进程）
 
@@ -209,9 +220,17 @@
 
 ## 9. 验证边界（不许据此报"跑通"）
 
-1. Electron 43.3.0 是否接受该应用传 `--remote-debugging-port`（即真能生成 `DevToolsActivePort`）——**\[未验证\]**。
-2. 线上 DOM 是否真有 `.cc-composer` / `.cc-composer-surface`——**\[未验证\]**（结论来自静态产物）。
-3. `accountOverview()` / `sessionStats()` / `sessionContextBreakdown()` 的真实返回结构——**\[未验证\]**。
+1. ~~Electron 43.3.0 是否接受 `--remote-debugging-port`~~ —— **已验证（2026-10-11 真机）**：接受，
+   `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1` 启动后 1.5 秒生成 `DevToolsActivePort`，
+   实测随机端口 5980，且 `netstat` 归属校验判定为 `Command Code.exe`。握手另需 N-8 的免 Origin 规则。
+2. 线上 DOM 是否真有 `.cc-composer` / `.cc-composer-surface`——**\[仍未验证\]**，验证它需要真机
+   `__goatProbe()` 回读 `mounted=true`；宿主此刻已带端口在跑，这一步随时可做。
+3. ~~三个接口的真实返回结构~~ —— **已验证**，见 §1 的信封与字段行。由此得到两条硬约束：
+   `sessionStats` 没有任何时长字段 ⇒ 速度类指标只能靠**读数条自行采样**（D-2 要求样本不足时显示不可用而不是 0）；
+   `sessionContextBreakdown` 对当前线程报错 ⇒ 不得作为数据源。
+4. **新证实的缺陷**：`widget.js:912` 把信封本身存进 `state.host`，`:386` 再读 `overview.windowLimits` 得 undefined，
+   而 `hostError` 因为"信封是非空对象"被判为空 ⇒ **真机上读数条一条指标都不出且零报错**。
+   这条必须在 D2 改造里连带修掉，并在夹具里加"信封非空但剥壳后为空"的用例。
 4. 任何"注入成功"的结论必须先有真机 `__goatProbe()`（`widget.js:1004`）回读 `mounted` 为真。
 5. **默认验证路径是免重启的同源夹具** `app/web/widget-preview.html`：复刻宿主 composer 的 DOM 与主题变量、
    mock `electronAPI`，加载**同一份** `app/web/widget.js`。绝不为验证而重启用户正在使用的 Command Code；
