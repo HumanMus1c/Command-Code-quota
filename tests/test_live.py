@@ -335,5 +335,17 @@ class StreamTestCase(LiveTestCaseBase):
         self.assertGreaterEqual(self.service.live(since_ms=-999_999)["stream"]["new_count"], 0)
 
 
+class StopSignalTestCase(unittest.TestCase):
+    def test_request_stop_works_without_a_host_callback(self) -> None:
+        # The --serve path never installs a callback; quit must still stop the
+        # service, or it silently keeps holding the port and the injection lock.
+        service = GaugeService(demo=True)
+        try:
+            self.assertFalse(service.stop_event.is_set())
+            service.request_stop()
+            self.assertTrue(service.stop_event.is_set())
+        finally:
+            service.store.close()
+
 if __name__ == "__main__":
     unittest.main()

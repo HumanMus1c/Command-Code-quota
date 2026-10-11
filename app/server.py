@@ -1068,6 +1068,13 @@ class GaugeService:
         self.store.close()
 
     def request_stop(self) -> None:
+        """Shut the service down, whether or not a host installed a callback.
+
+        The service owns the stop flag. Only Chrome mode ever supplied a callback,
+        so on the plain --serve path /api/quit answered {"ok":true} while nothing
+        stopped - the process kept holding the port and the injection lock.
+        """
+        self._stop_event.set()
         if self._stop_callback:
             self._stop_callback()
 
