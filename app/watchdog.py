@@ -193,6 +193,7 @@ def release_lock(path: Path, *, token: str) -> None:
 
 PROBE_EXPRESSION = """
 (async () => {
+  const PLAIN_KEY = /^[a-zA-Z][a-zA-Z0-9]{0,24}$/;
   const shape = (value, depth) => {
     if (value === null) return 'null';
     if (value === undefined) return 'undefined';
@@ -202,37 +203,71 @@ PROBE_EXPRESSION = """
     const type = typeof value;
     if (type !== 'object') return type;
     if (depth >= 3) return 'object';
+    const names = Object.keys(value);
+    // The host keys some maps by thread ID, so a key name can itself be an
+    // identifier. Anything that is not a plain field name is collapsed to a
+    // count and a value type rather than written out.
+    if (names.length > 20 || names.some((k) => !PLAIN_KEY.test(k))) {
+      return {__map__: names.length, __value__: names.length ? shape(value[names[0]], depth + 1) : 'empty'};
+    }
     const out = {};
-    for (const key of Object.keys(value).slice(0, 60)) out[key] = shape(value[key], depth + 1);
+    for (const key of names) out[key] = shape(value[key], depth + 1);
     return out;
   };
   const api = window.electronAPI;
   if (!api) return {ok: false, reason: 'no-electronAPI'};
-  const out = {ok: true, methods: {}, shapes: {}};
+  // Every bridge call answers an envelope, not the payload: accountOverview
+  // resolves {success, overview} and getAppState resolves {success, state}.
+  // Reading the envelope as if it were the payload yields undefined fields and
+  // a readout that silently never appears, so unwrap before anything else.
+  const NAMED = {accountOverview: 'overview', getAppState: 'state', sessionStats: 'stats',
+    sessionContextBreakdown: 'breakdown'};
+  const unwrap = (name, raw) => {
+    if (!raw || typeof raw !== 'object') return raw;
+    if (!Object.prototype.hasOwnProperty.call(raw, 'success')) return raw;
+    const named = NAMED[name];
+    if (named && raw[named] !== undefined) return raw[named];
+    const rest = Object.keys(raw).filter((k) => k !== 'success' && !/error/i.test(k));
+    return rest.length === 1 ? raw[rest[0]] : raw;
+  };
+  const out = {ok: true, methods: {}, envelopes: {}, shapes: {}};
   for (const name of ['accountOverview', 'getAppState', 'sessionStats', 'sessionContextBreakdown']) {
     out.methods[name] = typeof api[name];
   }
   let overview = null;
   let state = null;
-  try { overview = await api.accountOverview(); out.shapes.accountOverview = shape(overview, 0); }
-  catch (error) { out.shapes.accountOverview = 'error'; }
-  try { state = await api.getAppState(); out.shapes.getAppState = shape(state, 0); }
-  catch (error) { out.shapes.getAppState = 'error'; }
-  const threadId = state && state.appState ? state.appState.activeThreadId : null;
-  if (threadId) {
-    try { out.shapes.sessionStats = shape(await api.sessionStats(threadId), 0); }
-    catch (error) { out.shapes.sessionStats = 'error'; }
-    try { out.shapes.sessionContextBreakdown = shape(await api.sessionContextBreakdown(threadId), 0); }
-    catch (error) { out.shapes.sessionContextBreakdown = 'error'; }
+  let threadId = null;
+  try {
+    const raw = await api.accountOverview();
+    out.envelopes.accountOverview = Object.keys(Object(raw)).sort().join(',');
+    overview = unwrap('accountOverview', raw);
+    out.shapes.accountOverview = shape(overview, 0);
+  } catch (error) { out.shapes.accountOverview = 'error'; }
+  try {
+    const raw = await api.getAppState();
+    out.envelopes.getAppState = Object.keys(Object(raw)).sort().join(',');
+    state = unwrap('getAppState', raw);
+    out.shapes.getAppState = shape(state, 0);
+    threadId = state && state.activeThreadId;
+  } catch (error) { out.shapes.getAppState = 'error'; }
+  if (typeof threadId === 'string' && threadId) {
+    for (const name of ['sessionStats', 'sessionContextBreakdown']) {
+      try {
+        const raw = await api[name](threadId);
+        out.envelopes[name] = Object.keys(Object(raw)).sort().join(',');
+        out.shapes[name] = shape(unwrap(name, raw), 0);
+      } catch (error) { out.shapes[name] = 'error'; }
+    }
   } else {
     out.shapes.sessionStats = 'no-active-thread';
   }
   const user = overview && overview.user;
-  const raw = (user && (user.id || user.userId))
-    || (typeof (overview && overview.identity) === 'string' ? overview.identity : '');
-  const identity = (typeof raw === 'string' || typeof raw === 'number') ? String(raw) : '';
+  const raw = user && (user.id || user.userId);
+  const identity = (typeof raw === 'string' || typeof raw === 'number')
+    ? String(raw)
+    : (typeof (overview && overview.identity) === 'string' ? overview.identity : '');
   if (!identity || !globalThis.crypto || !crypto.subtle) {
-    return {ok: false, reason: 'no-account-identity', methods: out.methods, shapes: out.shapes};
+    return Object.assign(out, {ok: false, reason: 'no-account-identity'});
   }
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity));
   out.accountHash = Array.from(new Uint8Array(bytes)).map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 12);
@@ -285,15 +320,22 @@ def probe_host(
             last = "探针没有返回对象"
             continue
         digest = str(value.get("accountHash") or "")
+        diagnostics = {
+            "methods": value.get("methods"),
+            "envelopes": value.get("envelopes"),
+            "shapes": value.get("shapes"),
+        }
         if not ACCOUNT_HASH.match(digest):
-            return {"ok": False, "reason": str(value.get("reason") or "no-account-identity")}
-        payload = {"captured_at": round(now(), 3), "methods": value.get("methods"), "shapes": value.get("shapes")}
+            # Key names and types are the point of the probe, so a failed identity
+            # check must not throw away the very structure being diagnosed.
+            return {"ok": False, "reason": str(value.get("reason") or "no-account-identity"), **diagnostics}
+        payload = {"captured_at": round(now(), 3), **diagnostics}
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         if len(body.encode("utf-8")) > MAX_PROBE_BYTES:
             return {"ok": False, "reason": "probe-too-large"}
         path = runtime_dir() / digest / PROBE_NAME
         write_json_atomic(path, payload)
-        return {"ok": True, "path": str(path)}
+        return {"ok": True, "path": str(path), **diagnostics}
     return {"ok": False, "reason": last or "no-page"}
 
 

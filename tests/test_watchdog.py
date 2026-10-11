@@ -282,8 +282,14 @@ class ProbeTests(unittest.TestCase):
         self.assertNotIn("Alice", body)
         self.assertNotIn("a" * 12, body)
 
-    def test_no_resolvable_account_writes_nothing(self) -> None:
-        value = {"ok": False, "reason": "no-account-identity", "shapes": {}}
+    def test_no_resolvable_account_still_returns_the_structure(self) -> None:
+        value = {
+            "ok": False,
+            "reason": "no-account-identity",
+            "methods": {"accountOverview": "function"},
+            "envelopes": {"accountOverview": "overview,success"},
+            "shapes": {"accountOverview": {"user": {"id": "string"}}},
+        }
         page = mock.Mock(ws_url="ws://127.0.0.1:1/t", page_id="t")
         with (
             mock.patch.object(watchdog, "CdpConnection", _connection_factory(value)),
@@ -293,6 +299,9 @@ class ProbeTests(unittest.TestCase):
             result = watchdog.probe_host(profile=self.profile)
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "no-account-identity")
+        # The structure is the point of the probe, so it survives the failure.
+        self.assertEqual(result["envelopes"], {"accountOverview": "overview,success"})
+        self.assertEqual(result["shapes"]["accountOverview"]["user"], {"id": "string"})
         self.assertEqual(sorted(path.name for path in watchdog.runtime_dir().glob("*")), [])
 
     def test_oversized_self_report_is_rejected(self) -> None:

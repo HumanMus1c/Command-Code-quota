@@ -145,7 +145,11 @@ class CdpConnection:
             import websocket  # type: ignore
         except ImportError as exc:  # pragma: no cover - dependency guard
             raise InjectError("缺少 websocket-client 依赖") from exc
-        self._socket = websocket.create_connection(ws_url, timeout=timeout)
+        # Chromium rejects a DevTools handshake that carries a disallowed Origin,
+        # and websocket-client adds one by default. Sending no Origin at all keeps
+        # the port closed to web pages without widening it with
+        # --remote-allow-origins, which any local process could then abuse.
+        self._socket = websocket.create_connection(ws_url, timeout=timeout, suppress_origin=True)
         self._next_id = 1
         self._timeout = timeout
 
