@@ -1376,8 +1376,10 @@ def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False) ->
     print(f"GOAT Gauge: http://{bound_host}:{bound_port}/", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     try:
-        while True:
-            time.sleep(1)
+        # /api/quit sets the stop flag; sleeping forever in this loop would keep the
+        # process alive holding both the port and the injection lock.
+        while not service.stop_event.is_set():
+            time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
