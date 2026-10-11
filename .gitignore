@@ -16,6 +16,7 @@ venv/
 .chrome-live-profile/
 chrome-profile/
 data/
+.demo/
 credential.bin
 
 # Secrets / environment
