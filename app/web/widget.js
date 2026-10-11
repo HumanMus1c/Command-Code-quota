@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "3";
+  const VERSION = "4";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -145,6 +145,14 @@
     observer: null,
     resizer: null,
     mountedIn: null,
+    // Spec A-5: each await below is checked against this generation, so a reply
+    // that lands after a thread switch can never paint the previous conversation.
+    generation: 0,
+    threadId: "",
+    stats: null,
+    statsAt: 0,
+    inFlight: false,
+    samples: [],
   };
 
   const layout = {
@@ -301,8 +309,21 @@
     layout.order = result;
   }
 
-  const bar = (share, tone) =>
-    `<span class="bar${tone ? " " + tone : ""}"><i style="width:${(clamp(share, 0, 1) * 100).toFixed(1)}%"></i></span>`;
+  /* A progress bar with no semantics reads as nothing at all, and `4/6` is
+   * spoken as "four slash six" unless valuetext spells it out (spec P-8). */
+  function bar(share, tone, label, used, cap) {
+    const now = Number(used);
+    const max = Number(cap);
+    const semantic =
+      isFinite(now) && isFinite(max) && max > 0
+        ? ` role="progressbar" aria-valuemin="0" aria-valuemax="${trim(max)}"` +
+          ` aria-valuenow="${trim(now)}" aria-valuetext="${label} ${trim(now)} / ${trim(max)}"`
+        : "";
+    return (
+      `<span class="bar${tone ? " " + tone : ""}"${semantic}>` +
+      `<i style="width:${(clamp(share, 0, 1) * 100).toFixed(1)}%"></i></span>`
+    );
+  }
 
   function chrome(id) {
     if (!layout.editing) {
@@ -325,7 +346,7 @@
     return (
       `<span class="chip meter${tone ? " " + tone : ""}" data-metric="${id}">` +
       `<b>${label}</b><em>${trim(used)}/${trim(cap)}</em>` +
-      bar(share, tone) +
+      bar(share, tone, label, used, cap) +
       `<span class="cd">${countdown(resetAt)}</span>${chrome(id)}</span>`
     );
   }
@@ -477,11 +498,13 @@
 
   function toolsHtml(fresh) {
     const L = locale();
+    const busy = fresh.state === "empty" || fresh.state === "error" ? "true" : "false";
     if (!layout.editing) {
       return (
         `<span class="chip dot" data-state="${fresh.state}" title="${fresh.text}"` +
-        ` aria-label="${fresh.text}"><i></i></span>` +
-        `<button class="tool" type="button" data-act="edit" title="${L.edit}" aria-label="${L.edit}">⚙</button>`
+        ` aria-label="${fresh.text}"><i aria-hidden="true"></i></span>` +
+        `<button class="tool" type="button" data-act="edit" title="${L.edit}"` +
+        ` aria-label="${L.edit}" aria-busy="${busy}">⚙</button>`
       );
     }
     const hidden = layout.hidden.filter((id) => DEFAULT_ORDER.indexOf(id) >= 0);
@@ -514,7 +537,13 @@
       return;
     }
     const host = state.host ? hostPayload(state.host) : null;
-    const pushed = state.pushed || {};
+    // Rates and burn prefer the local service's numbers (it holds per-request
+    // durations) and fall back to what the host alone can supply.
+    const pushed = {
+      rates: rates(),
+      projections: projections(),
+      monthly: (state.pushed && state.pushed.monthly) || {},
+    };
     const L = locale();
     const parts = [];
 
@@ -643,17 +672,92 @@
     return chipNode.classList.contains("meter") || chipNode.classList.contains("dot");
   }
 
-  /* The readout is a flex sibling of the composer; never let it paint over it. */
-  function guardAgainstHost(node, row) {
-    const host =
-      document.querySelector(".cc-composer-surface") || document.querySelector(".cc-composer");
-    if (!host) {
-      return;
+  const HOST_CONTROL = 'button,a[href],[role="button"],[role="combobox"],input,select,[contenteditable="true"]';
+
+  function intersection(a, b) {
+    const left = Math.max(a.left, b.left);
+    const right = Math.min(a.right, b.right);
+    const top = Math.max(a.top, b.top);
+    const bottom = Math.min(a.bottom, b.bottom);
+    if (right - left <= 0 || bottom - top <= 0) {
+      return null;
     }
+    return { left, right, top, bottom };
+  }
+
+  /* Two boxes sharing an area does not prove one paints over the other: a host
+   * button can overlap the bar's rectangle while the bar is on top of it, and a
+   * decorative layer can own the point instead. Ask who actually receives the
+   * pointer at the overlap's centre and four corners. */
+  function pointHitsHost(node, area) {
+    if (typeof document.elementFromPoint !== "function") {
+      return true;  // without a hit test, stay conservative: hide rather than cover
+    }
+    const probes = [
+      [(area.left + area.right) / 2, (area.top + area.bottom) / 2],
+      [area.left + 1, area.top + 1],
+      [area.right - 1, area.top + 1],
+      [area.left + 1, area.bottom - 1],
+      [area.right - 1, area.bottom - 1],
+    ];
+    for (const probe of probes) {
+      const hit = document.elementFromPoint(Math.round(probe[0]), Math.round(probe[1]));
+      if (!hit || hit === node || node.contains(hit)) {
+        continue;
+      }
+      let style = null;
+      try {
+        style = getComputedStyle(hit);
+      } catch {
+        style = null;
+      }
+      if (style && (style.visibility === "hidden" || style.pointerEvents === "none")) {
+        continue;  // not something the user can actually click
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /* The readout never paints over a host control: overlapping the composer, a
+   * guard inside the composer's own row, or a real hit on an external control
+   * all hide it. */
+  function guardAgainstHost(node, row) {
     const mine = node.getBoundingClientRect();
-    const theirs = host.getBoundingClientRect();
-    if (mine.bottom > theirs.top + 1 || mine.width < 40 || chips(row).length === 0) {
+    const composer = document.querySelector(".cc-composer");
+    const surface = document.querySelector(".cc-composer-surface") || composer;
+    let blocked =
+      mine.width < 40 ||
+      chips(row).length === 0 ||
+      Boolean(surface && mine.bottom > surface.getBoundingClientRect().top + 1);
+    if (!blocked) {
+      for (const control of [...document.querySelectorAll(HOST_CONTROL)].filter(visible)) {
+        if (node.contains(control)) {
+          continue;
+        }
+        const area = intersection(mine, control.getBoundingClientRect());
+        if (!area) {
+          continue;
+        }
+        if (composer && composer.contains(control)) {
+          blocked = true;
+          break;
+        }
+        if (pointHitsHost(node, area)) {
+          blocked = true;
+          break;
+        }
+      }
+    }
+    if (blocked) {
       node.dataset.layout = "blocked";
+      // visibility:hidden alone still lets a screen reader speak the bar and Tab
+      // still walks into it, which is the opposite of "not present".
+      node.inert = true;
+      node.setAttribute("aria-hidden", "true");
+    } else {
+      node.inert = false;
+      node.removeAttribute("aria-hidden");
     }
   }
 
@@ -719,6 +823,8 @@
   cursor:pointer}
 :host([data-edit="on"]) .chip:not(.muted) .hide{display:grid}
 .chip .hide:hover{border-color:var(--goat-danger,#ef4444);color:var(--goat-danger,#ef4444)}
+.tool:focus-visible,.pick:focus-visible,.hide:focus-visible{outline:2px solid var(--goat-accent,#7c5cf6);
+  outline-offset:1px;border-radius:6px}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 `;
 
@@ -909,20 +1015,120 @@
     return true;
   }
 
+  /* The bridge answers an envelope ({success, overview}); reading the envelope as
+   * the payload leaves every field undefined while the object check still passes
+   * - a readout that shows nothing and reports no error. */
+  const ENVELOPE_KEY = { accountOverview: "overview", getAppState: "state", sessionStats: "stats" };
+
+  function unwrap(name, reply) {
+    if (!reply || typeof reply !== "object" || !("success" in reply)) {
+      return reply;
+    }
+    if (reply.success === false) {
+      return null;
+    }
+    const key = ENVELOPE_KEY[name];
+    if (key && reply[key] !== undefined) {
+      return reply[key];
+    }
+    const rest = Object.keys(reply).filter((item) => item !== "success" && !/error/i.test(item));
+    return rest.length === 1 ? reply[rest[0]] : reply;
+  }
+
+  function readThread(api) {
+    if (typeof api.getAppState !== "function") {
+      return Promise.resolve("");
+    }
+    return api.getAppState().then((reply) => {
+      const loaded = unwrap("getAppState", reply);
+      return loaded && typeof loaded.activeThreadId === "string" ? loaded.activeThreadId : "";
+    });
+  }
+
+  /* Credits burned per hour is by definition a wall-clock rate, so a sampled
+   * difference of the host's own counter is the correct maths. tok/s is not:
+   * it needs per-request streaming time, which the host never reports, so it
+   * stays a service-only metric instead of being guessed from wall clock (D-7). */
+  function recordSample(host) {
+    const used = host && host.five ? Number(host.five.used) : NaN;
+    if (!isFinite(used)) {
+      return;
+    }
+    const last = state.samples[state.samples.length - 1];
+    if (last && used < last.five - 1e-9) {
+      state.samples = [];  // window reset: the previous span says nothing about this one
+    }
+    state.samples.push({ at: now(), five: used });
+    if (state.samples.length > 40) {
+      state.samples.shift();
+    }
+  }
+
+  function sampledBurn() {
+    if (state.samples.length < 2) {
+      return NaN;
+    }
+    const first = state.samples[0];
+    const last = state.samples[state.samples.length - 1];
+    const hours = (last.at - first.at) / 3600e3;
+    if (!(hours >= 5 / 60) || last.five - first.five < 0) {
+      return NaN;  // warm-up: never extrapolate a rate from a two-second span
+    }
+    return (last.five - first.five) / hours;
+  }
+
+  function cacheHit(stats) {
+    const tokens = stats && stats.tokens;
+    if (!tokens) {
+      return NaN;
+    }
+    const read = Number(tokens.cacheRead);
+    const input = Number(tokens.input);
+    if (!isFinite(read) || !isFinite(input) || read + input <= 0) {
+      return NaN;  // absence is not zero (D-2)
+    }
+    return (read / (read + input)) * 100;
+  }
+
+  function rates() {
+    const pushed = (state.pushed && state.pushed.rates) || {};
+    const hit = Number(pushed.hit_rate_pct);
+    return {
+      tokens_per_sec: Number(pushed.tokens_per_sec),
+      requests_per_min: Number(pushed.requests_per_min),
+      hit_rate_pct: isFinite(hit) ? hit : cacheHit(state.stats),
+    };
+  }
+
+  function projections() {
+    const pushed = ((state.pushed && state.pushed.projections) || {}).five_hour || {};
+    const burn = Number(pushed.burn_per_hour);
+    if (isFinite(burn)) {
+      return { five_hour: { burn_per_hour: burn, verdict: pushed.verdict } };
+    }
+    const sampled = sampledBurn();
+    return { five_hour: isFinite(sampled) ? { burn_per_hour: sampled } : {} };
+  }
+
   async function pullHost() {
+    if (state.inFlight) {
+      return;  // one flight per cycle; a heartbeat during a pull is redundant work
+    }
     const api = window.electronAPI;
     if (!api || typeof api.accountOverview !== "function") {
       state.hostError = "no-bridge";
       render();
       return;
     }
+    state.inFlight = true;
+    const generation = state.generation;
+    const stale = () => generation !== state.generation;
     try {
       const reply = await api.accountOverview();
-      // Every bridge call answers an envelope ({success, overview}); treating the
-      // envelope as the payload leaves every field undefined while the object
-      // check still passes - a readout that shows nothing and reports no error.
-      const overview =
-        reply && typeof reply === "object" && "success" in reply ? reply.overview : reply;
+      if (stale()) {
+        return;
+      }
+      const overview = unwrap("accountOverview", reply);
       if (reply && typeof reply === "object" && reply.success === false) {
         state.host = null;
         state.hostError = "unsuccessful";
@@ -930,14 +1136,51 @@
         state.host = overview;
         state.hostAt = Date.now();
         state.hostError = "";
+        recordSample(hostPayload(overview));
       } else {
         state.host = null;
         state.hostError = "empty";
       }
+
+      const threadId = await readThread(api);
+      if (stale()) {
+        return;
+      }
+      if (threadId && threadId !== state.threadId) {
+        // A new conversation owns none of the previous session's numbers, so every
+        // session-scoped value is dropped and the in-flight result is orphaned by
+        // the bumped generation. The credit window is account-wide, so its newest
+        // sample survives.
+        state.threadId = threadId;
+        state.stats = null;
+        state.statsAt = 0;
+        state.samples = state.samples.slice(-1);
+        state.generation = generation + 1;
+        return;
+      }
+      if (state.threadId && typeof api.sessionStats === "function") {
+        const statsReply = await api.sessionStats(state.threadId);
+        if (stale()) {
+          return;
+        }
+        const stats = unwrap("sessionStats", statsReply);
+        if (stats && typeof stats === "object") {
+          state.stats = stats;
+          state.statsAt = Date.now();
+        } else {
+          state.stats = null;
+        }
+      }
     } catch (error) {
-      state.hostError = String(error && error.message ? error.message : error).slice(0, 120);
+      if (!stale()) {
+        state.hostError = String(error && error.message ? error.message : error).slice(0, 120);
+      }
+    } finally {
+      state.inFlight = false;
     }
-    render();
+    if (!stale()) {
+      render();
+    }
   }
 
   function schedule(delay) {
@@ -1018,6 +1261,34 @@
     return { ok: true, mounted: Boolean(document.getElementById(ID)) };
   };
 
+  /* Presentation state that can be compared, not just logged: a layout or motion
+   * change has to show a difference here before anyone may claim it took effect
+   * (spec P-7). Numbers, ids and class names only - no account data. */
+  function fingerprint() {
+    const node = document.getElementById(ID);
+    if (!node || !node.shadowRoot) {
+      return "absent";
+    }
+    const row = node.shadowRoot.getElementById("row");
+    const board = row
+      ? chips(row).map((chipNode) => chipNode.dataset.metric || "tool").join("+")
+      : "";
+    const measured = row ? Math.round(row.scrollWidth) : 0;
+    const height = row ? Math.round(row.clientHeight) : 0;
+    const burn = sampledBurn();
+    return [
+      node.dataset.state,
+      node.dataset.layout,
+      node.dataset.edit,
+      String((document.documentElement || {}).lang || ""),
+      node.dataset.dark,
+      node.inert ? "inert" : "live",
+      board,
+      `w${measured}xh${height}`,
+      `src=${state.pushed ? "push" : "-"}+${state.host ? "host" : "-"}+${isFinite(burn) ? "sample" : "-"}`,
+    ].join("|");
+  }
+
   window.__goatProbe = () => ({
     mounted: Boolean(document.getElementById(ID)),
     version: window.__goatWidgetVersion || "",
@@ -1028,6 +1299,9 @@
     editing: layout.editing,
     metrics: currentLayout(),
     dark: (document.getElementById(ID) || {}).dataset ? document.getElementById(ID).dataset.dark : "",
+    fingerprint: fingerprint(),
+    session: state.threadId ? "known" : "none",
+    statsAt: state.statsAt,
   });
 
   // Scriptable surface for the injector and for tests; also the only way to
@@ -1067,6 +1341,7 @@
   };
 
   window.__goatDispose = () => {
+    state.generation += 1;  // orphan any in-flight bridge call before the board goes away
     if (state.timer) clearTimeout(state.timer);
     if (state.heartbeat) clearInterval(state.heartbeat);
     if (state.observer) state.observer.disconnect();

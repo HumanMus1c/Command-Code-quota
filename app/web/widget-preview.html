@@ -151,6 +151,17 @@
         success: true,
         state: { activeThreadId: "fixture-thread", model: "deepseek/deepseek-v4.1-flash" },
       }),
+      // Same envelope the host really answers with, so the cache chip is proven
+      // on the fixture before it is ever claimed on the host.
+      sessionStats: async () => ({
+        success: true,
+        stats: {
+          branches: 3,
+          messages: 41,
+          contextUsage: { current: 92000, limit: 256000 },
+          tokens: { input: 350329637, output: 1141771, cacheRead: 305786260, cacheWrite: 4102933 },
+        },
+      }),
     };
 
     // Same-origin fetch of the real local service; the production path pushes the

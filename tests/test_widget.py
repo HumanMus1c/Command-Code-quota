@@ -67,6 +67,7 @@ class El {
   addEventListener() {}
   removeEventListener() {}
   setAttribute(k, v) { this.attrs[k] = String(v); if (k === "id") this.id = String(v); }
+  removeAttribute(k) { delete this.attrs[k]; if (k === "id") this.id = ""; }
   getAttribute(k) { return this.attrs[k]; }
   append(...nodes) { for (const n of nodes) { n.parentElement = this; this.children.push(n); } }
   insertBefore(node, ref) {
@@ -147,6 +148,14 @@ class El {
   get textContent() { return this._text; }
   getBoundingClientRect() { return this.rect; }
   getClientRects() { return this.rect ? [this.rect] : []; }
+  contains(other) {
+    let node = other;
+    while (node) {
+      if (node === this) return true;
+      node = node.parentElement || (node.host && node.host.parentElement) || null;
+    }
+    return false;
+  }
   get isConnected() {
     let node = this;
     while (node.parentElement) node = node.parentElement;
@@ -185,6 +194,7 @@ function findById(node, id) {
 }
 
 function matches(node, sel) {
+  if (sel.includes(",")) return sel.split(",").some((part) => matches(node, part.trim()));
   if (sel.startsWith(".")) return node._class.has(sel.slice(1));
   const bare = /^\[([a-z-]+)\]$/.exec(sel);
   if (bare) return node.attrs[bare[1]] !== undefined || node.dataset[bare[1].slice(5)] !== undefined;
@@ -230,6 +240,8 @@ function makeDoc(lang) {
       walk(root);
       return out;
     },
+    elementFromPoint: (x, y) =>
+      (typeof root._hitAt === "function" ? root._hitAt(x, y) : null),
     addEventListener: () => {},
   };
 }
@@ -796,6 +808,38 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   await tick();
   check("ambiguity: two visible composers mount nothing rather than guess",
     !findById(twinWorld.doc.documentElement, "goat-gauge-widget"));
+
+  // ---- occlusion: hiding takes a real pointer hit, and hiding means inert ----
+  const covered = composerDoc();
+  const floatButton = new El("button");
+  floatButton.className = "send";
+  covered.feed.append(floatButton);
+  covered.doc.documentElement._hitAt = () => floatButton;
+  run({
+    doc: covered.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  const coveredNode = findById(covered.doc.documentElement, "goat-gauge-widget");
+  check("occlusion: a real hit on a host control hides the bar",
+    coveredNode && coveredNode.dataset.layout === "blocked",
+    coveredNode && coveredNode.dataset.layout);
+  check("occlusion: the hidden bar is inert and out of the a11y tree",
+    coveredNode && coveredNode.inert === true && coveredNode.getAttribute("aria-hidden") === "true");
+
+  const clear = composerDoc();
+  const twinButton = new El("button");
+  twinButton.className = "send";
+  clear.feed.append(twinButton);
+  // Same geometry as the covered case; the only difference is who owns the point.
+  clear.doc.documentElement._hitAt = () => findById(clear.doc.documentElement, "goat-gauge-widget");
+  run({
+    doc: clear.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  const clearNode = findById(clear.doc.documentElement, "goat-gauge-widget");
+  check("occlusion: a rectangle the bar is merely painted over keeps it visible",
+    clearNode && clearNode.inert === false && clearNode.dataset.layout !== "blocked",
+    clearNode && `${clearNode.dataset.layout}/${clearNode.inert}`);
 
   const failed = results.filter((r) => !r.ok);
   for (const r of results) {

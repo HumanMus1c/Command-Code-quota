@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-WIDGET_VERSION = "3"
+WIDGET_VERSION = "4"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
 MAX_PORT_FILE_BYTES = 1024
 MAX_TARGETS_BYTES = 1_000_000
@@ -203,6 +203,10 @@ def guarded_source(source: str, target: CdpTarget) -> str:
         + "if(window.__goatWidgetVersion=="
         + json.dumps(WIDGET_VERSION)
         + "){return;}"
+        # A page still holding an older build has its own heartbeat and observer
+        # running; leaving it up would render two boards into one slot.
+        + "if(window.__goatWidgetVersion&&window.__goatDispose){try{window.__goatDispose();}"
+        + "catch(error){}}"
         + source
         + "})()"
     )
@@ -226,7 +230,10 @@ class WidgetInjector:
         self.log = log
         self._sessions: dict[str, dict[str, Any]] = {}
         self._stop = threading.Event()
-        self._lock = threading.Lock()
+        # attach() holds this lock while it probes whether a page is still alive,
+        # and that probe comes back through evaluate() on the same lock, so it has
+        # to be reentrant or the first reconcile of a live page self-deadlocks.
+        self._lock = threading.RLock()
         self.last_error = ""
         self.host_theme = ""
 

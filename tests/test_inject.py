@@ -152,6 +152,13 @@ class SourceWrappingTestCase(unittest.TestCase):
         self.assertIn('location.origin!=="https://app.commandcode.ai"', wrapped)
         self.assertIn("window.__goatWidgetVersion", wrapped)
 
+    def test_a_stale_build_is_disposed_before_the_new_one_runs(self) -> None:
+        # Two copies of the script in one page means two heartbeats rendering into
+        # the same slot, so the older build has to be torn down first.
+        wrapped = guarded_source("void 0;", make_target())
+        self.assertIn("window.__goatDispose()", wrapped)
+        self.assertLess(wrapped.index("window.__goatDispose()"), wrapped.index("void 0;"))
+
     def test_file_pages_guard_on_protocol_because_origin_is_null(self) -> None:
         # Chrome reports location.origin === "null" for file:// documents; an
         # origin equality guard there would silently never mount.
@@ -284,6 +291,29 @@ class InjectorLifecycleTestCase(unittest.TestCase):
         ):
             injector.attach()
         self.assertEqual(list(injector._sessions), ["p1"])
+
+    def test_reconcile_of_a_live_page_does_not_deadlock_on_its_own_lock(self) -> None:
+        # attach() probes liveness while holding the session lock, and that probe
+        # re-enters through evaluate(). With a non-reentrant lock the watchdog
+        # hangs on its very first reconcile, which no socket-less test ever reaches.
+        connection = RecordingConnection(
+            replies={"Runtime.evaluate": {"result": {"value": {"mounted": True}}}}
+        )
+        injector = self.build(connection)
+        with mock.patch.object(inject, "devtools_port", return_value=9333), mock.patch.object(
+            inject, "discover_targets", return_value=[make_target()]
+        ):
+            injector.attach()
+            finished = threading.Event()
+
+            def second() -> None:
+                injector.attach()
+                finished.set()
+
+            worker = threading.Thread(target=second, daemon=True)
+            worker.start()
+            self.assertTrue(finished.wait(2.0), "attach() deadlocked reconciling a live page")
+        self.assertEqual(injector.attached(), 1)
 
     def test_open_registers_and_evaluates_in_order(self) -> None:
         # Exercise the real _open path with a fake CdpConnection.
