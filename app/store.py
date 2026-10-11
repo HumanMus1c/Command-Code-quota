@@ -386,6 +386,77 @@ class Store:
             "newest_ms": int(row["newest"] or 0),
         }
 
+    def usage_activity(self, *, window_ms: int) -> dict[str, Any]:
+        """Per-request throughput inside a trailing wall-clock window.
+
+        ``active_ms`` spans the first and last record rather than the whole
+        window, so an idle tail does not dilute the rate; the caller keeps the
+        window too and reports how much of it actually carried traffic.
+        """
+        now_ms = int(time.time() * 1000)
+        since = now_ms - max(60_000, int(window_ms))
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS requests,
+                       COALESCE(SUM(tokens_in), 0) AS tokens_in,
+                       COALESCE(SUM(tokens_out), 0) AS tokens_out,
+                       COALESCE(SUM(cost_total), 0) AS cost_total,
+                       COALESCE(SUM(duration_ms), 0) AS duration_total,
+                       MIN(created_ms) AS first_ms,
+                       MAX(created_ms) AS last_ms
+                FROM usage_records
+                WHERE created_ms >= ?
+                """,
+                (since,),
+            ).fetchone()
+        requests = int(row["requests"] or 0)
+        first_ms = int(row["first_ms"] or 0)
+        last_ms = int(row["last_ms"] or 0)
+        tokens_in = int(row["tokens_in"] or 0)
+        tokens_out = int(row["tokens_out"] or 0)
+        return {
+            "window_ms": max(60_000, int(window_ms)),
+            "since_ms": since,
+            "requests": requests,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tokens_total": tokens_in + tokens_out,
+            "cost_total": float(row["cost_total"] or 0.0),
+            "duration_ms": int(row["duration_total"] or 0),
+            "first_ms": first_ms,
+            "last_ms": last_ms,
+            "active_ms": max(0, last_ms - first_ms) if requests > 1 else 0,
+        }
+
+    def usage_records_newer_than(
+        self,
+        since_ms: int,
+        *,
+        limit: int = 25,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Records newer than ``since_ms``: newest page plus the true count."""
+        floor = max(0, int(since_ms))
+        with self._lock:
+            total = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) AS c FROM usage_records WHERE created_ms > ?",
+                    (floor,),
+                ).fetchone()["c"]
+            )
+            rows = self._conn.execute(
+                """
+                SELECT id, created_ms, model, tokens_in, tokens_out,
+                       cost_total, cost_cache, duration_ms, status
+                FROM usage_records
+                WHERE created_ms > ?
+                ORDER BY created_ms DESC
+                LIMIT ?
+                """,
+                (floor, max(1, min(int(limit), 100))),
+            ).fetchall()
+        return [dict(row) for row in rows], total
+
     # ------------------------------------------------------------------
     # 缓存聚合桶 (来自 /internal/usage/charts)
     # ------------------------------------------------------------------
@@ -669,6 +740,27 @@ class Store:
             return json.loads(row["payload"])
         except json.JSONDecodeError:
             return None
+
+    def history_window(self, since_ms: int) -> list[dict[str, Any]]:
+        """Raw snapshot points after ``since_ms``, oldest first, no sampling.
+
+        Slopes and reset detection need every point, not a thinned copy.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT fetched_at, five_used, five_cap, five_remaining_pct,
+                       weekly_used, weekly_cap, weekly_remaining_pct,
+                       monthly_remaining, monthly_used, monthly_cap,
+                       monthly_remaining_pct, total_cost, total_count,
+                       tokens_in, tokens_out
+                FROM snapshots
+                WHERE fetched_at >= ?
+                ORDER BY fetched_at ASC
+                """,
+                (max(0, int(since_ms)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def history(self, *, hours: int = 24, limit: int = 480) -> list[dict[str, Any]]:
         since = int((time.time() - max(1, hours) * 3600) * 1000)

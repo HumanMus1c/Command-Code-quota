@@ -199,6 +199,173 @@ def _demo_snapshot() -> dict[str, Any]:
     }
 
 
+# ----------------------------------------------------------------------
+# 实时层: 一次轮询算出曲线、速率与耗尽预测
+# ----------------------------------------------------------------------
+
+LIVE_RATE_WINDOW_MINUTES = 30
+LIVE_BURN_SPAN_MS = 20 * 60_000
+LIVE_BURN_LOOKBACK_MS = 2 * 3_600_000
+
+# 跌幅超过窗口上限的这个比例才算重置; 更小的回落是上游四舍五入抖动,
+# 若也当成重置, 燃烧率会毫无必要地退化成未知
+RESET_DROP_RATIO = 0.2
+
+BURN_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("five_hour", "five_used", "five_cap"),
+    ("weekly", "weekly_used", "weekly_cap"),
+    ("monthly", "monthly_used", "monthly_cap"),
+)
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _burn_sample(
+    points: list[dict[str, Any]],
+    used_key: str,
+    cap_key: str,
+    *,
+    span_ms: int,
+) -> dict[str, Any] | None:
+    """Credits burned per hour, time-weighted inside the current window.
+
+    The walk-back restarts at any reset-sized drop so an earlier climb in the
+    same sample set cannot be averaged in, while jitter below the threshold is
+    ignored instead of being mistaken for a reset. The measured span is
+    reported so the interface can label the figure rather than let it read as
+    a window average.
+    """
+    rows = [
+        (
+            int(row.get("fetched_at") or 0),
+            _float_or_none(row.get(used_key)),
+            _float_or_none(row.get(cap_key)),
+        )
+        for row in points
+    ]
+    rows = [item for item in rows if item[0] > 0 and item[1] is not None]
+    if len(rows) < 2:
+        return None
+    start = 0
+    for index in range(1, len(rows)):
+        drop = rows[index - 1][1] - rows[index][1]
+        cap = rows[index][2] or 0.0
+        if drop > 0 and (not cap or drop > cap * RESET_DROP_RATIO):
+            start = index
+    newest_stamp = rows[-1][0]
+    floor_stamp = newest_stamp - max(60_000, int(span_ms))
+    segment = [item for item in rows[start:] if item[0] >= floor_stamp]
+    if len(segment) < 2:
+        segment = rows[start:]
+    if len(segment) < 2:
+        return None
+    first_stamp, first_used = segment[0][0], segment[0][1]
+    last_stamp, last_used = segment[-1][0], segment[-1][1]
+    elapsed_ms = last_stamp - first_stamp
+    if elapsed_ms <= 0:
+        return None
+    per_hour = 0.0 if last_used <= first_used else (last_used - first_used) / (
+        elapsed_ms / 3_600_000
+    )
+    return {
+        "per_hour": round(per_hour, 4),
+        "span_ms": elapsed_ms,
+        "samples": len(segment),
+    }
+
+
+def _activity_rates(activity: dict[str, Any]) -> dict[str, Any]:
+    """Throughput over the busiest recent stretch, not a window mean."""
+    requests = int(activity.get("requests") or 0)
+    tokens = int(activity.get("tokens_total") or 0)
+    tokens_out = int(activity.get("tokens_out") or 0)
+    cost = float(activity.get("cost_total") or 0.0)
+    active_ms = int(activity.get("active_ms") or 0)
+    rates: dict[str, Any] = {
+        "window_ms": int(activity.get("window_ms") or 0),
+        "requests": requests,
+        "tokens_in": int(activity.get("tokens_in") or 0),
+        "tokens_out": tokens_out,
+        "tokens_total": tokens,
+        "cost_total": cost,
+        "active_ms": active_ms,
+        "duration_ms": int(activity.get("duration_ms") or 0),
+        "first_ms": int(activity.get("first_ms") or 0),
+        "last_ms": int(activity.get("last_ms") or 0),
+        "requests_per_min": None,
+        "tokens_per_min": None,
+        "tokens_per_sec": None,
+        "cost_per_hour": None,
+        "basis": "none",
+    }
+    if requests <= 0:
+        return rates
+    # Generation speed is normalised by the time requests actually spent
+    # streaming, not by the first-to-last span: the span folds idle gaps into
+    # the denominator and reports a fraction of the real rate. It is also valid
+    # for a single record, which carries its own tokens and duration, so it must
+    # stay outside the span-based block below -- otherwise the figure flickers
+    # out of the readout whenever the window holds one request.
+    streaming_seconds = rates["duration_ms"] / 1000.0
+    if streaming_seconds >= 1.0:
+        rates["tokens_per_sec"] = round(tokens_out / streaming_seconds, 1)
+    if requests < 2:
+        rates["basis"] = "single"
+        return rates
+    minutes = max(60_000, active_ms) / 60_000
+    rates["basis"] = "active_span"
+    rates["requests_per_min"] = round(requests / minutes, 2)
+    rates["tokens_per_min"] = round(tokens / minutes, 1)
+    rates["cost_per_hour"] = round(cost / minutes * 60, 4)
+    return rates
+
+
+def _projection(
+    window: dict[str, Any],
+    burn: dict[str, Any] | None,
+    now_ms: int,
+) -> dict[str, Any]:
+    """Where the current pace leaves this window relative to its reset."""
+    remaining = _float_or_none(window.get("remaining"))
+    reset_at = int(window.get("reset_at") or 0)
+    per_hour = burn.get("per_hour") if burn else None
+    out: dict[str, Any] = {
+        "remaining": remaining,
+        "reset_at": reset_at,
+        "burn_per_hour": per_hour,
+        "burn_span_ms": burn.get("span_ms") if burn else None,
+        "minutes_left": None,
+        "exhaust_at": None,
+        "verdict": "unknown",
+    }
+    if remaining is None:
+        return out
+    if remaining <= 0:
+        out["verdict"] = "exhausted"
+        return out
+    if per_hour is None:
+        return out
+    if per_hour <= 0:
+        out["verdict"] = "idle"
+        return out
+    minutes_left = remaining / per_hour * 60.0
+    out["minutes_left"] = round(minutes_left, 1)
+    out["exhaust_at"] = int(now_ms + minutes_left * 60_000)
+    if not reset_at:
+        out["verdict"] = "open"
+    elif out["exhaust_at"] < reset_at:
+        out["verdict"] = "before_reset"
+    else:
+        out["verdict"] = "after_reset"
+    return out
+
+
 class GaugeService:
     def __init__(self, *, demo: bool = False) -> None:
         self.demo = demo
@@ -227,11 +394,18 @@ class GaugeService:
         self._usage_synced_count = 0
         self._usage_error: str | None = None
         self._relogin_requested_at = 0.0
+        # Filled in by the injector from the live renderer, so the preview page
+        # can follow the app's real theme instead of guessing one.
+        self.host_theme = ""
         self._load_initial_credential()
 
     @property
     def data_dir(self) -> str:
         return str(self.store.data_dir)
+
+    @property
+    def stop_event(self) -> threading.Event:
+        return self._stop_event
 
     def _load_initial_credential(self) -> None:
         if self.demo:
@@ -558,6 +732,89 @@ class GaugeService:
             "fetched": meta.get("fetched", 0),
             "window": meta.get("window", {}),
             **bounds,
+        }
+
+    def live(self, *, since_ms: int = 0) -> dict[str, Any]:
+        """One lightweight poll: freshness, quota curve, throughput, new rows.
+
+        Deliberately reads only local SQLite plus the in-memory snapshot, so the
+        browser can poll it aggressively without reaching upstream.
+        """
+        now = _now_ms()
+        settings = self.store.get_settings()
+        refresh_seconds = max(
+            30, int(settings.get("refresh_seconds") or DEFAULT_SETTINGS["refresh_seconds"])
+        )
+        with self._lock:
+            snapshot = self._snapshot or {}
+            refreshing = self._refreshing
+            last_error = self._last_error
+            usage_error = self._usage_error
+            is_configured = self.configured()
+
+        fetched_at = int(snapshot.get("fetched_at") or 0)
+        age_ms = max(0, now - fetched_at) if fetched_at else None
+        if not is_configured:
+            state = "unconfigured"
+        elif last_error:
+            state = "error"
+        elif refreshing:
+            state = "refreshing"
+        elif not fetched_at:
+            state = "empty"
+        elif age_ms and age_ms > refresh_seconds * 1500:
+            state = "stale"
+        else:
+            state = "live"
+
+        burn_points = self.store.history_window(now - LIVE_BURN_LOOKBACK_MS)
+        windows = snapshot.get("windows") or {}
+        projections: dict[str, Any] = {}
+        for kind, used_key, cap_key in BURN_COLUMNS:
+            burn = _burn_sample(burn_points, used_key, cap_key, span_ms=LIVE_BURN_SPAN_MS)
+            projections[kind] = _projection(windows.get(kind) or {}, burn, now)
+
+        rates = _activity_rates(
+            self.store.usage_activity(window_ms=LIVE_RATE_WINDOW_MINUTES * 60_000)
+        )
+        # Cache hit rate comes from the aggregate buckets rather than the record
+        # sample, and both the HTTP endpoint and the injected readout read it
+        # from here so they cannot drift apart.
+        rates["hit_rate_pct"] = round(self.store.cache_stats("today").get("hit_rate", 0.0), 2)
+
+        records, new_count = self.store.usage_records_newer_than(
+            max(0, int(since_ms)),
+            limit=25,
+        )
+        monthly = windows.get("monthly") or {}
+        return {
+            "server_time": now,
+            # The host's own overview carries no monthly ceiling, so the plan
+            # cap travels alongside the remaining credits to keep the meter
+            # honest instead of drawing a bar from an invented denominator.
+            "monthly": {
+                "cap": _float_or_none(monthly.get("cap")),
+                "remaining": _float_or_none(monthly.get("remaining")),
+                "reset_at": int(monthly.get("reset_at") or 0),
+            },
+            "fresh": {
+                "state": state,
+                "configured": is_configured,
+                "fetched_at": fetched_at,
+                "age_ms": age_ms,
+                "refresh_seconds": refresh_seconds,
+                "refreshing": refreshing,
+                "last_error": last_error,
+                "usage_error": usage_error,
+            },
+            "rates": rates,
+            "projections": projections,
+            "host": {"theme": self.host_theme},
+            "stream": {
+                "new_count": new_count,
+                "watermark_ms": int(self.store.usage_record_bounds()["newest_ms"] or 0),
+                "records": records,
+            },
         }
 
     def history(self, *, hours: int = 24, limit: int = 480) -> dict[str, Any]:
@@ -944,6 +1201,14 @@ class GaugeHandler(BaseHTTPRequestHandler):
             _json_response(self, self.service.history(hours=hours))
             return
 
+        if path == "/api/live" and method == "GET":
+            try:
+                since_ms = max(0, int((query.get("since") or ["0"])[0]))
+            except ValueError:
+                since_ms = 0
+            _json_response(self, self.service.live(since_ms=since_ms))
+            return
+
         if path == "/api/dashboard" and method == "GET":
             range_key = (query.get("range") or ["today"])[0]
             _json_response(self, self.service.dashboard(range_key))
@@ -1078,10 +1343,20 @@ def stop_server() -> None:
         _server_thread = None
 
 
-def run_foreground(*, host: str, port: int, demo: bool) -> None:
+def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False) -> None:
     service = GaugeService(demo=demo)
     bound_host, bound_port = start_server(host=host, port=port, service=service)
     service.start_background()
+    if inject:
+        from .inject import commandcode_profile_dir, start_injection
+
+        profile = commandcode_profile_dir()
+        start_injection(service, service.stop_event)
+        print(
+            "读数条注入已启动；若 Command Code 未带调试端口运行则不会挂载。"
+            f"\n  宿主配置目录: {profile}",
+            flush=True,
+        )
     print(f"GOAT Gauge: http://{bound_host}:{bound_port}/", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
     try:
