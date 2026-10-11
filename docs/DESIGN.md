@@ -64,6 +64,17 @@
   + `visibility !== 'hidden'`。
 - **A-4 重挂载靠 MutationObserver + 1 秒心跳双保险**（`widget.js:940-942`），启动顺序上脚本可能早于
   `.cc-composer` 出现——预览页 `?late=1` 就是专门复现该顺序的夹具，改动挂载逻辑必须跑它。
+- **A-5 异步结果必须带请求代次**（当前代码**尚未**满足：读数条改走 D2 后 `electronAPI.*` 全是异步 Promise，
+  而宿主可在等待期间换 thread）。规则：
+  - 每次**导航 / 切换 thread / 重新挂载**递增一个代次，并同时重置该会话的刷新预算，立即调度首次拉取；
+  - 回调只有「代次仍是当前值 **且** 返回数据所属会话标识与请求时一致」才允许写状态；
+  - 晚到的响应、异常分支、`finally` 一律不得改动新会话的状态；卸载与 `__goatDispose()` 必须先失效化所有
+    in-flight 请求再拆节点。
+  `sessionStats(sessionId)` / `sessionContextBreakdown(sessionId)` 必须回读比对请求时用的那个 `sessionId`，
+  **不接受"最近一个会话"**；`sessionId` 取自 `getAppState()` 的 `appState.activeThreadId`，且只认当前输入框
+  所属区域的会话（上游同类边界见 `ide/surface.cjs:57-90` 的 `active / new / unavailable` 三态，
+  同类缺陷成因见 `docs/ROBUSTNESS.md:95`——跨路由全局 pending 让新会话在等旧请求）。
+  新会话没有任何样本时显示"不可用/横线"，**不得**沿用上一个会话的数字。
 
 ## 4. 数据边界
 
@@ -96,6 +107,18 @@
 - **L-4 判活禁止依赖 HTTP 端点**：面板废弃后 `/api/state`、`/api/quit` 不存在，改由锁文件 + 进程名判定。
 - **L-5 幂等**：同一份源码重复注入不得产生第二个节点；源码指纹变化时才清理并替换（`WIDGET_VERSION`
   `inject.py:24` 与 `widget.js` 内部版本必须同步，不一致的 payload 直接丢弃）。
+- **L-6 写用户数据目录必须原子且不越界**（当前代码**尚未**满足：`watchdog.py` 与 `install.ps1` 尚未落地，
+  现有 `credentials.py` 的 DPAPI 写入同样要按本条复核）：
+  - 一律"**同目录 temp 文件写完 → `os.replace`**"，禁止就地截断重写（上游同一做法：`manage.py:36-40`）；
+    同目录才保证同卷，rename 才是原子的。
+  - 落盘路径必须先 `resolve()` 再校验仍在 `%LOCALAPPDATA%\GOATGauge\` 之内；**拒绝符号链接与越界目录**
+    （上游：`manage.py:42-46,155-159`）。
+  - 读侧对损坏 JSON / 半写文件按"忽略该文件"处理并继续运行，**实时显示不得因持久化失败而中断**，
+    但要注明"未保存"（上游：`docs/ROBUSTNESS.md:29` 那一行故障矩阵）。
+  - `watchdog.lock` 内容 = PID + 实际随机端口 + 启动时间；抢占失败的新实例立即退出（见 L-3），
+    也绝不用写锁以外的方式判活（见 L-4）。
+  - 任何被本插件写到宿主目录或用户目录的文件都必须出现在 `uninstall.ps1` 的清理清单里；
+    宿主安装目录**不在其中**（见 N-2）。
 
 ## 6. 呈现
 
@@ -111,6 +134,15 @@
 - **P-6 布局编辑**存 `localStorage` 的 `goat-gauge-layout-v2`；提交时只重写**当前真的有数据、真的在板上渲染出来**
   的槽位，暂时无数据的指标保持原位，否则一次偶发空窗会永久打乱用户布局。所有事件在 Shadow DOM 内委托并
   `stopPropagation`，不漏给宿主输入框。
+- **P-7 呈现状态必须可量化自证**（当前代码**尚未**满足：`__goatProbe()` 现只回读
+  `mounted / version / host / hostError / pushed / layout / editing / metrics`，见 `widget.js:1004-1012`）。
+  把它扩成一段**布局指纹**，至少含：`dataset.state`、`dataset.layout`、`dataset.edit`、当前语言标签、主题签名、
+  在场指标的 `data-metric` 序列、`#row` 的 `scrollWidth` 与 `clientHeight`、与宿主可点击控件的相交数。
+  上游同类做法是 `compat/inline-widget.cjs:198` 的 `probeKey()`——把样式文本、语言、会话、条内文本、
+  状态点类名、各控件宽度拼成一个可比较的键。
+  验收规则：**动效/布局类改动必须给出改动前后两份指纹的差异**；生命周期日志全绿而屏上零效果不算跑通
+  （对应既有教训"begin/done 日志全绿也可能屏上零效果"）。
+  指纹只允许含数值、布尔与自有类名——**不含账号数据、模型名、路径、宿主文本**。
 
 ## 7. 故障 × 防护 × 验证
 
