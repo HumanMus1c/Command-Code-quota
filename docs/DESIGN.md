@@ -27,7 +27,9 @@
 | `stats` 字段 | `sessionStats(threadId) → {branches:number, messages:number, contextUsage{current,limit}, tokens{input,output,cacheRead,cacheWrite}}` ⇒ **没有任何时长或时间戳字段**，命中率可由 `cacheRead/(input+cacheRead)` 算，tok/s 与 cr/h **不能由单次宿主调用得出** | \[实测\] |
 | `sessionContextBreakdown` | 对当前活动线程返回 `{success:false, error:string}` ⇒ 不可依赖 | \[实测，仅此一线程\] |
 | CDP 握手 | Chromium 150 拒绝**带 Origin** 的 WebSocket 升级（403，并提示加 `--remote-allow-origins`）。正确解法是**不发 Origin**（`websocket-client` 的 `suppress_origin=True`），加那个开关等于把端口让给本机任意网页进程 | \[实测\] |
-| 界面锚点 | `.cc-composer-surface` > `.cc-composer` > `.cc-composer-toolbar` > 其内 `textarea[rows="1"]`；路径上无 `data-testid` | 构建产物 \[静态\]，线上 DOM \[未验证\] |
+| 界面锚点 | **真机普查（只读求值，未注入）**：`.cc-composer`=1、`.cc-composer-surface`=1、`.cc-composer-toolbar`=1、`textarea[rows="1"]`=1、`[contenteditable="true"]`=0 ⇒ 锚点存在且唯一。优先级仍按 `.cc-composer-surface` > `.cc-composer` > `.cc-composer-toolbar` > `textarea`；路径上无 `data-testid` | 真机 \[实测\] |
+| 宿主容器几何 | `.cc-feed-body`=0，且 `.cc-composer` 的上溯四层是 `block/row`：`cc-composer w-full` → `mx-auto w-full px-` → `shrink-0 pb-2 pt-2` → `relative z-10 shrink-0 px-[v`。⇒ **"挂在同一 flex 列的兄弟位置"这一前提不成立**，真实容器是块流，宽度由容器决定而非 flex 分配。插入方式与 P-2 的测量假设都要按块流重做 | 真机 \[实测\] |
+| 明暗与语言 | `data-theme="dark"` + `classList.contains('dark')=true`、`<html lang="en">`、文档协议 `file:` | 真机 \[实测\] |
 | 语言 | i18next 单命名空间 `desktop`，`supportedLngs:["en","zh"]`，`fallbackLng:"en"`；切语言改写 `<html lang>`（zh → `zh-Hans`） | \[静态\] |
 | 主题 | `<html data-theme>`（`light\|dark\|purple\|purple-dark`）+ `classList.toggle('dark', theme!=='light')` | \[静态\] |
 | 真实上限量级 | 5 小时 3、本周 6 credits（**不是** 14/35/70） | \[实测\] |
@@ -223,8 +225,9 @@
 1. ~~Electron 43.3.0 是否接受 `--remote-debugging-port`~~ —— **已验证（2026-10-11 真机）**：接受，
    `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1` 启动后 1.5 秒生成 `DevToolsActivePort`，
    实测随机端口 5980，且 `netstat` 归属校验判定为 `Command Code.exe`。握手另需 N-8 的免 Origin 规则。
-2. 线上 DOM 是否真有 `.cc-composer` / `.cc-composer-surface`——**\[仍未验证\]**，验证它需要真机
-   `__goatProbe()` 回读 `mounted=true`；宿主此刻已带端口在跑，这一步随时可做。
+2. 线上 DOM 的锚点存在性 —— **已验证（只读普查，未注入）**：四个锚点各 1 个、无非可编辑伪输入框、文档是 `file:`。
+   仍未验证的是**挂载本身**（真机 `__goatProbe()` 回读 `mounted=true`），且普查新推翻了 flex 列前提（见 §1
+   宿主容器几何），插入方式必须按块流重做后才能谈挂载验收。
 3. ~~三个接口的真实返回结构~~ —— **已验证**，见 §1 的信封与字段行。由此得到两条硬约束：
    `sessionStats` 没有任何时长字段 ⇒ 速度类指标只能靠**读数条自行采样**（D-2 要求样本不足时显示不可用而不是 0）；
    `sessionContextBreakdown` 对当前线程报错 ⇒ 不得作为数据源。
