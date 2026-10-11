@@ -1,6 +1,10 @@
 const $ = (id) => document.getElementById(id);
 
 const RING_CIRCUMFERENCE = 2 * Math.PI * 52;
+const POLL_VISIBLE_MS = 2500;
+const POLL_HIDDEN_MS = 15000;
+const RESET_REFRESH_COOLDOWN_MS = 30000;
+const RECORDS_SYNC_THROTTLE_MS = 4000;
 const MODEL_COLORS = [
   "#7c5cf6",
   "#4f8ef7",
@@ -14,15 +18,41 @@ const MODEL_COLORS = [
   "#6366f1",
 ];
 
+
+const FRESH_LABELS = {
+  live: "实时更新",
+  refreshing: "刷新中",
+  stale: "数据过期",
+  error: "上游异常",
+  empty: "等待同步",
+  unconfigured: "未连接",
+  offline: "服务无响应",
+};
+
+
 const app = {
   state: null,
   dashboard: null,
+  live: null,
   range: "today",
   modelDim: "tokens",
   trendMetric: "cost",
   records: { page: 1, page_size: 20, total: 0, model: "", rows: [] },
-  pollTimer: null,
+  pollHandle: null,
   countdownTimer: null,
+  liveStarted: false,
+  snapshotFetchedAt: 0,
+  serverOffset: 0,
+  clockDriftWarned: false,
+  sinceMs: 0,
+  streamBaselined: false,
+  recordsSyncedAt: 0,
+  resetRefreshedFor: 0,
+  lastResetRefreshAt: 0,
+  nextRefreshAt: 0,
+  rendered: {},
+  recordIds: new Set(),
+  recordsSeeded: false,
   usageUrl: "https://commandcode.ai/settings/usage",
 };
 
@@ -106,6 +136,12 @@ function bindEvents() {
       loadRecords();
     }
   });
+  $("records-new").addEventListener("click", () => {
+    app.records.page = 1;
+    $("record-model-filter").value = "";
+    app.records.model = "";
+    loadRecords();
+  });
   $("record-model-filter").addEventListener("change", () => {
     app.records.model = $("record-model-filter").value;
     app.records.page = 1;
@@ -133,6 +169,13 @@ function bindEvents() {
   rateInput.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       rateInput.blur();
+    }
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    // 回到前台立刻补一帧，不等下一个轮询周期
+    if (!document.hidden) {
+      scheduleLivePoll(0);
     }
   });
 
@@ -169,16 +212,18 @@ async function init() {
     handleState(state);
   } catch (error) {
     showToast(error.message, "error");
-    setLiveState("error", "连接异常");
+    setLiveState("offline", "服务无响应");
   }
-  app.countdownTimer = window.setInterval(updateCountdowns, 1000);
-  app.pollTimer = window.setInterval(() => refreshState(true), 5000);
-  updateCountdowns();
+  app.countdownTimer = window.setInterval(tickClock, 1000);
+  tickClock();
 }
 
 function handleState(state) {
   app.state = state;
   const meta = state.meta || {};
+  noteServerClock(meta.server_time);
+  app.nextRefreshAt = Number(meta.next_refresh_at || 0);
+  app.snapshotFetchedAt = Number((state.snapshot || {}).fetched_at || 0);
   const configured = Boolean(state.configured);
   $("onboarding").hidden = configured;
   $("dashboard").hidden = !configured;
@@ -186,35 +231,119 @@ function handleState(state) {
   renderSettings(state.settings || {});
   renderConnectionBadge(configured);
   if (!configured) {
-    setLiveState("error", "未连接");
+    setLiveState("unconfigured", "未连接");
     return;
   }
 
   $("demo-badge").hidden = !meta.demo;
   renderDashboard(state);
   if (meta.refreshing) {
-    setLiveState("loading", "刷新中");
+    setLiveState("refreshing", "刷新中");
   } else if (meta.last_error) {
-    setLiveState("error", "部分数据过期");
+    setLiveState("error", "上游异常");
   } else {
     setLiveState("live", "实时更新");
   }
   loadDashboard();
   loadRecords();
+  startLiveLoop();
+}
+
+function nextDelay() {
+  return document.hidden ? POLL_HIDDEN_MS : POLL_VISIBLE_MS;
+}
+
+function startLiveLoop() {
+  if (app.liveStarted || !app.state?.configured) {
+    return;
+  }
+  app.liveStarted = true;
+  scheduleLivePoll(400);
+}
+
+function scheduleLivePoll(delay) {
+  if (!app.state?.configured) {
+    return;
+  }
+  if (app.pollHandle) {
+    window.clearTimeout(app.pollHandle);
+  }
+  app.pollHandle = window.setTimeout(pollLive, Math.max(0, delay));
+}
+
+let liveInFlight = null;
+
+function pollLive() {
+  if (liveInFlight) {
+    // 已有请求在飞, 只重排下次时机, 不叠请求
+    scheduleLivePoll(nextDelay());
+    return;
+  }
+  liveInFlight = runLivePoll().finally(() => {
+    liveInFlight = null;
+  });
+  scheduleLivePoll(nextDelay());
+}
+
+async function runLivePoll() {
+  if (!app.state?.configured) {
+    return;
+  }
+  const params = new URLSearchParams({ since: String(app.sinceMs || 0) });
+  try {
+    const live = await api(`/api/live?${params.toString()}`);
+    applyLivePayload(live);
+  } catch (error) {
+    setLiveState("offline", "服务无响应");
+  }
+}
+
+function applyLivePayload(live) {
+  app.live = live;
+  noteServerClock(live.server_time);
+  const fresh = live.fresh || {};
+  app.nextRefreshAt = 0;
+  renderFreshness(fresh);
+  applyStream(live.stream);
+  // 上游快照确实换了才付一次 /api/state 的代价, 平时只走轻量的 /api/live
+  const fetchedAt = Number(fresh.fetched_at || 0);
+  if (fetchedAt && fetchedAt !== app.snapshotFetchedAt) {
+    app.snapshotFetchedAt = fetchedAt;
+    refreshState(true);
+  }
+}
+
+function noteServerClock(serverTime) {
+  const server = Number(serverTime);
+  if (!Number.isFinite(server) || server <= 0) {
+    return;
+  }
+  app.serverOffset = server - Date.now();
+  if (!app.clockDriftWarned && Math.abs(app.serverOffset) > 300_000) {
+    app.clockDriftWarned = true;
+    showToast(
+      `本机时钟与服务端相差 ${formatSpan(Math.abs(app.serverOffset))}，倒计时已按服务端时间校正。`,
+      "warning"
+    );
+  }
+}
+
+function nowMs() {
+  return Date.now() + app.serverOffset;
+}
+
+function tickClock() {
+  updateCountdowns();
+  updateFreshAge();
+  maybeRefreshOnReset();
 }
 
 async function refreshState(silent = false) {
   try {
     const state = await api("/api/state");
-    const changed =
-      (state.meta || {}).usage_synced_at !== (app.state?.meta || {}).usage_synced_at;
     handleState(state);
-    if (changed) {
-      loadDashboard();
-      loadRecords();
-    }
   } catch (error) {
-    setLiveState("error", "连接异常");
+    setLiveState("offline", "服务无响应");
     if (!silent) {
       showToast(error.message, "error");
     }
@@ -224,11 +353,11 @@ async function refreshState(silent = false) {
 async function manualRefresh() {
   const button = $("refresh-button");
   setButtonLoading(button, true);
-  setLiveState("loading", "刷新中");
+  setLiveState("refreshing", "刷新中");
   try {
     const state = await api("/api/refresh", { method: "POST", body: "{}" });
     handleState(state);
-    await Promise.all([loadDashboard(), loadRecords()]);
+    scheduleLivePoll(300);
     showToast("额度与记录已刷新");
   } catch (error) {
     setLiveState("error", "刷新失败");
@@ -270,6 +399,13 @@ async function loadRecords() {
     const payload = await api(`/api/usage/records?${params.toString()}`);
     app.records.rows = payload.records || [];
     app.records.total = payload.total || 0;
+    // 表格内容已与这一刻的水位线对齐, 新记录计数从这里重新开始
+    app.recordsSyncedAt = nowMs();
+    const watermark = Number(app.live?.stream?.watermark_ms || 0);
+    if (watermark) {
+      app.sinceMs = Math.max(app.sinceMs, watermark);
+    }
+    $("records-new").hidden = true;
     renderRecordFilter(payload.models || []);
     renderRecords();
   } catch (error) {
@@ -422,9 +558,6 @@ function renderDashboard(state) {
   $("account-subtitle").textContent = account.user_name
     ? `@${account.user_name} · ${plan.status || "active"}`
     : plan.status || "Command Code account";
-  $("last-updated").textContent = snapshot.fetched_at
-    ? formatDateTime(snapshot.fetched_at)
-    : "--";
   app.usageUrl = snapshot.studio_url || app.usageUrl;
 
   renderWindow("five", windows.five_hour || {});
@@ -432,7 +565,7 @@ function renderDashboard(state) {
   renderWindow("month", windows.monthly || {});
   renderAccountDetails(snapshot, state);
   renderAlerts(meta, snapshot.alerts || []);
-  updateCountdowns();
+  tickClock();
 }
 
 function renderWindow(prefix, windowData) {
@@ -508,6 +641,9 @@ function renderKpis() {
   const totals = app.dashboard?.totals || {};
   const snapshot = app.state?.snapshot || {};
   const credits = snapshot.credits || {};
+  if (!contentChanged("kpis", [totals, credits, activeCurrency(), usdToCnyRate()])) {
+    return;
+  }
   const cost = numberOrNull(totals.cost_total) || 0;
   const requests = numberOrNull(totals.requests) || 0;
   const tokensIn = numberOrNull(totals.tokens_in) || 0;
@@ -554,9 +690,12 @@ function renderKpis() {
 
 function renderModels() {
   const models = app.dashboard?.models || [];
+  const dim = app.modelDim;
+  if (!contentChanged("models", [models, dim, activeCurrency(), usdToCnyRate()])) {
+    return;
+  }
   const svg = $("model-donut");
   const list = $("model-list");
-  const dim = app.modelDim;
   const valueOf = (item) => {
     if (dim === "cost") return numberOrNull(item.cost_total) || 0;
     if (dim === "requests") return numberOrNull(item.requests) || 0;
@@ -642,6 +781,17 @@ function renderModels() {
 
 function renderTrend() {
   const points = (app.dashboard?.daily || []).filter((point) => point.day);
+  if (
+    !contentChanged("trend", [
+      app.range,
+      points,
+      app.trendMetric,
+      activeCurrency(),
+      usdToCnyRate(),
+    ])
+  ) {
+    return;
+  }
   const svg = $("trend-chart");
   const empty = $("chart-empty");
   svg.replaceChildren();
@@ -755,6 +905,11 @@ function renderTrend() {
 function renderBounds() {
   const bounds = app.dashboard?.bounds || {};
   const cacheBounds = app.dashboard?.cache_bounds || {};
+  if (
+    !contentChanged("bounds", [bounds, cacheBounds, app.dashboard?.has_buckets])
+  ) {
+    return;
+  }
   const count = numberOrNull(bounds.count) || 0;
   const cacheCount = numberOrNull(cacheBounds.count) || 0;
   const hasBuckets = Boolean(app.dashboard?.has_buckets);
@@ -780,7 +935,19 @@ function renderBounds() {
   note.textContent = parts.join(" · ");
 }
 
+function contentChanged(key, value) {
+  const signature = JSON.stringify(value);
+  if (app.rendered[key] === signature) {
+    return false;
+  }
+  app.rendered[key] = signature;
+  return true;
+}
+
 function renderRecordFilter(models) {
+  if (!contentChanged("recordFilter", models)) {
+    return;
+  }
   const select = $("record-model-filter");
   const current = app.records.model;
   select.replaceChildren();
@@ -798,14 +965,57 @@ function renderRecordFilter(models) {
   app.records.model = select.value;
 }
 
+function buildRecordRow(record) {
+  const row = document.createElement("tr");
+  row.dataset.id = String(record.id || "");
+  const cells = [
+    { text: formatDateTime(record.created_ms), className: "" },
+    { text: record.model || "--", className: "model-cell" },
+    { text: formatCompact(record.tokens_in), className: "num" },
+    { text: formatCompact(record.tokens_out), className: "num" },
+    { text: formatMoney(record.cost_cache), className: "num muted" },
+    { text: formatMoney(record.cost_total), className: "num strong" },
+    { text: formatDuration(record.duration_ms), className: "num muted" },
+  ];
+  cells.forEach((item) => {
+    const cell = document.createElement("td");
+    cell.className = item.className;
+    cell.textContent = item.text;
+    if (item.className.includes("model-cell")) {
+      cell.title = item.text;
+    }
+    row.append(cell);
+  });
+  return row;
+}
+
 function renderRecords() {
-  const body = $("records-body");
   const rows = app.records.rows || [];
+  if (
+    !contentChanged("records", [
+      app.records.page,
+      app.records.page_size,
+      app.records.total,
+      app.range,
+      rows,
+    ])
+  ) {
+    return;
+  }
   const pages = Math.max(1, Math.ceil(app.records.total / app.records.page_size));
   $("records-count").textContent = `共 ${formatInteger(app.records.total)} 条`;
   $("records-pager").textContent = `第 ${app.records.page} / ${pages} 页`;
   $("records-prev").disabled = app.records.page <= 1;
   $("records-next").disabled = app.records.page >= pages;
+
+  const body = $("records-body");
+  const ids = rows.map((item) => String(item.id || ""));
+  // 首屏是历史样本而不是"刚到达", 不点亮高亮
+  const fresh = app.recordsSeeded
+    ? new Set(ids.filter((id) => id && !app.recordIds.has(id)))
+    : new Set();
+  app.recordsSeeded = true;
+  app.recordIds = new Set(ids);
 
   body.replaceChildren();
   if (!rows.length) {
@@ -820,25 +1030,10 @@ function renderRecords() {
   }
 
   rows.forEach((record) => {
-    const row = document.createElement("tr");
-    const cells = [
-      { text: formatDateTime(record.created_ms), className: "" },
-      { text: record.model || "--", className: "model-cell" },
-      { text: formatCompact(record.tokens_in), className: "num" },
-      { text: formatCompact(record.tokens_out), className: "num" },
-      { text: formatMoney(record.cost_cache), className: "num muted" },
-      { text: formatMoney(record.cost_total), className: "num strong" },
-      { text: formatDuration(record.duration_ms), className: "num muted" },
-    ];
-    cells.forEach((item) => {
-      const cell = document.createElement("td");
-      cell.className = item.className;
-      cell.textContent = item.text;
-      if (item.className.includes("model-cell")) {
-        cell.title = item.text;
-      }
-      row.append(cell);
-    });
+    const row = buildRecordRow(record);
+    if (fresh.has(String(record.id || ""))) {
+      row.dataset.fresh = "new";
+    }
     body.append(row);
   });
 }
@@ -907,6 +1102,114 @@ function renderAlerts(meta, alerts) {
   );
 }
 
+function renderFreshness(fresh) {
+  const state = String(fresh.state || "live");
+  setLiveState(state, FRESH_LABELS[state] || "实时更新");
+  const dashboard = $("dashboard");
+  if (dashboard) {
+    dashboard.dataset.fresh = state;
+  }
+  updateFreshAge();
+}
+
+function updateFreshAge() {
+  const fresh = app.live?.fresh || {};
+  const fetchedAt = Number(fresh.fetched_at || app.state?.snapshot?.fetched_at || 0);
+  if (!fetchedAt) {
+    $("last-updated").textContent = "--";
+    $("refresh-age").textContent = "--";
+    return;
+  }
+  $("last-updated").textContent = formatDateTime(fetchedAt);
+  $("refresh-age").textContent = formatAgo(Math.max(0, nowMs() - fetchedAt));
+}
+
+function applyStream(stream) {
+  if (!stream) {
+    return;
+  }
+  const watermark = Number(stream.watermark_ms || 0);
+  if (!app.streamBaselined) {
+    // 首帧只对齐水位线, 不把已有历史当成"刚到达"闪一遍
+    app.streamBaselined = true;
+    if (watermark) {
+      app.sinceMs = watermark;
+    }
+    $("records-new").hidden = true;
+    return;
+  }
+  const pending = Number(stream.new_count || 0);
+  const pill = $("records-new");
+  if (pending <= 0) {
+    pill.hidden = true;
+    return;
+  }
+  pill.hidden = false;
+  pill.textContent = `${formatInteger(pending)} 条新记录`;
+  // 只在用户正看着最新一页时把新记录补进表格, 不去动他翻到的页码或筛选
+  const canAppend = app.records.page === 1 && !app.records.model;
+  if (canAppend && nowMs() - app.recordsSyncedAt >= RECORDS_SYNC_THROTTLE_MS) {
+    app.sinceMs = Math.max(app.sinceMs, watermark);
+    loadRecords();
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function formatAgo(ms) {
+  const value = numberOrNull(ms);
+  if (value === null || value < 0) {
+    return "--";
+  }
+  return value < 12_000 ? "刚刚" : `${formatAge(ms)}前`;
+}
+
+function formatAge(ms) {
+  const value = numberOrNull(ms);
+  if (value === null || value < 0) {
+    return "--";
+  }
+  if (value < 12_000) {
+    return "刚刚";
+  }
+  if (value < 60_000) {
+    return `${Math.round(value / 1000)} 秒`;
+  }
+  if (value < 3_600_000) {
+    return `${Math.round(value / 60_000)} 分钟`;
+  }
+  return `${(value / 3_600_000).toFixed(1)} 小时`;
+}
+
+function formatSpan(ms) {
+  const value = Math.abs(numberOrNull(ms) || 0);
+  if (value < 1000) {
+    return "不足 1 秒";
+  }
+  if (value < 60_000) {
+    return `${Math.round(value / 1000)} 秒`;
+  }
+  if (value < 3_600_000) {
+    return `${Math.round(value / 60_000)} 分钟`;
+  }
+  const hours = Math.floor(value / 3_600_000);
+  const minutes = Math.round((value % 3_600_000) / 60_000);
+  return minutes ? `${hours} 小时 ${minutes} 分` : `${hours} 小时`;
+}
+
 function renderSettings(settings) {
   const refreshSeconds = Number(settings.refresh_seconds || 60);
   document.querySelectorAll("#refresh-segment button").forEach((button) => {
@@ -943,10 +1246,47 @@ function renderConnectionBadge(configured) {
 }
 
 function updateCountdowns() {
+  const now = nowMs();
   document.querySelectorAll("[data-reset-at]").forEach((node) => {
     const resetAt = Number(node.dataset.resetAt || 0);
     node.textContent = resetAt ? countdownText(resetAt) : "重置时间未知";
+    node.classList.toggle("is-passed", Boolean(resetAt) && resetAt <= now);
   });
+}
+
+function passedResets() {
+  const now = nowMs();
+  let newest = 0;
+  document.querySelectorAll("[data-reset-at]").forEach((node) => {
+    const resetAt = Number(node.dataset.resetAt || 0);
+    if (resetAt > app.resetRefreshedFor && resetAt <= now) {
+      newest = Math.max(newest, resetAt);
+    }
+  });
+  return newest;
+}
+
+function maybeRefreshOnReset() {
+  const passed = passedResets();
+  if (!passed || !app.state?.configured) {
+    return;
+  }
+  if (nowMs() - app.lastResetRefreshAt < RESET_REFRESH_COOLDOWN_MS) {
+    return;
+  }
+  app.lastResetRefreshAt = nowMs();
+  app.resetRefreshedFor = passed;
+  forceRefreshSilently();
+}
+
+async function forceRefreshSilently() {
+  try {
+    const state = await api("/api/refresh", { method: "POST", body: "{}" });
+    handleState(state);
+    scheduleLivePoll(300);
+  } catch {
+    // 重置瞬间上游仍可能返回旧窗口, 状态交由下一帧 /api/live 如实标出
+  }
 }
 
 function openSettings() {
@@ -1179,11 +1519,15 @@ function formatDate(value) {
 }
 
 function countdownText(timestamp) {
-  const diff = Number(timestamp) - Date.now();
+  const diff = Number(timestamp) - nowMs();
   if (!Number.isFinite(diff) || diff <= 0) {
     return "等待重置";
   }
-  const totalMinutes = Math.floor(diff / 60000);
+  const totalSeconds = Math.max(1, Math.floor(diff / 1000));
+  if (totalSeconds < 60) {
+    return `${totalSeconds} 秒后重置`;
+  }
+  const totalMinutes = Math.floor(totalSeconds / 60);
   const days = Math.floor(totalMinutes / 1440);
   const hours = Math.floor((totalMinutes % 1440) / 60);
   const minutes = totalMinutes % 60;
@@ -1193,7 +1537,7 @@ function countdownText(timestamp) {
   if (hours > 0) {
     return `${hours}小时 ${minutes}分后重置`;
   }
-  return `${Math.max(1, minutes)}分钟后重置`;
+  return `${minutes}分 ${totalSeconds % 60}秒后重置`;
 }
 
 function statusText(status) {
