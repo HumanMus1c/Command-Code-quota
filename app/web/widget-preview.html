@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>读数条预览 — 复刻 Command Code 输入框</title>
+  <style>
+    /* Same token names Command Code uses, so the readout inherits the palette
+       instead of imitating it. Two themes only: simple light and simple dark.
+       Light is the base rule: an unresolved page must never fall into dark. */
+    :root {
+      --background: #f7f8fa; --card: #ffffff; --popover: #f2f4f7; --border: #e4e7ec;
+      --foreground: #1c1f24; --ink-subtle: #667085; --primary: #2f6fed;
+      --destructive: #dc2626; --warning: #b54708; --success: #079455; --radius: 14px;
+    }
+    html[data-theme="dark"] {
+      --background: #1b1725; --card: #221d2e; --popover: #272134; --border: #362f45;
+      --foreground: #ece8f6; --ink-subtle: #a79fbd; --primary: #8b5cf6;
+      --destructive: #ef4444; --warning: #d97706; --success: #22c55e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--background); color: var(--foreground);
+      font-family: "Fira Sans", system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+      font-size: 14px; height: 100vh; display: flex; flex-direction: column;
+    }
+    .bar-top {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 8px 16px; border-bottom: 1px solid var(--border); background: var(--card);
+      font-size: 12px; color: var(--ink-subtle);
+    }
+    .theme-source { margin-right: 10px; font-size: 11px; opacity: .7; }
+    .bar-top button {
+      border: 1px solid var(--border); background: var(--popover); color: var(--foreground);
+      border-radius: 8px; padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
+    }
+    .cc-feed-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .messages { flex: 1; overflow: auto; padding: 18px 0; }
+    .msg { max-width: 48rem; margin: 0 auto 14px; padding: 0 1rem; color: var(--ink-subtle); }
+    .msg.me { color: var(--foreground); }
+    .cc-composer { width: 100%; flex: none; }
+    .cc-composer-surface {
+      position: sticky; bottom: 0; z-index: 1; overflow: hidden;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--card);
+      max-width: 48rem; margin: 0 auto;
+    }
+    .notice {
+      display: block; margin: 12px 16px 0; padding: 8px 10px; font-size: 12px;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--popover);
+      color: var(--ink-subtle);
+    }
+    textarea {
+      display: block; width: 100%; border: 0; background: transparent; color: var(--foreground);
+      padding: 10px 44px; font: inherit; resize: none; min-height: 42px;
+    }
+    textarea:focus { outline: none; }
+    .cc-composer-toolbar {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 28px; padding: 0 10px; border-top: 1px solid var(--border); font-size: 12px;
+    }
+    .cc-composer-toolbar .left, .cc-composer-toolbar .right { display: flex; align-items: center; gap: 8px; }
+    .cc-composer-model, .cc-composer-permission, .cc-composer-effort {
+      color: var(--ink-subtle); border: 1px solid var(--border); border-radius: 7px; padding: 2px 8px;
+    }
+    .send {
+      width: 24px; height: 24px; border-radius: 7px; border: 0; cursor: pointer;
+      background: var(--primary); color: #fff;
+    }
+    .host-meter { display: none; }
+    .host-meter.visible { display: block; }
+    .host-meter > div { max-width: 48rem; margin: 0 auto; padding: 8px 1rem 0; }
+    .host-meter output {
+      display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12px;
+      border: 1px solid var(--warning); background: rgba(217, 119, 6, .1); color: var(--warning);
+      border-radius: 8px; padding: 6px 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="bar-top">
+    <span>预览宿主（非 Command Code 本体）· 读数条源码即 app/web/widget.js，与注入正式版同一份</span>
+    <span>
+      <button id="lang" type="button">English</button>
+      <button id="narrow" type="button">变窄</button>
+      <button id="theme" type="button">简洁深色</button>
+      <button id="reset-theme" type="button">跟随宿主</button>
+      <span id="theme-source" class="theme-source">主题来源：初始化中</span>
+    </span>
+  </div>
+
+  <div class="cc-feed-body">
+    <div class="messages">
+      <div class="msg me">这条预览用来确认读数条在真实浏览器里的位置、配色与降级行为。</div>
+      <div class="msg">它必须贴在输入框正上方，不能盖住发送按钮；变窄时先换行、再丢次要指标，最后才牺牲倒计时与进度条。</div>
+    </div>
+
+    <!-- The host's own warning band: it only appears above 85% usage. -->
+    <div class="host-meter" id="host-meter">
+      <div><output>Weekly limit · 85% used</output></div>
+    </div>
+
+    <div class="cc-composer">
+      <div class="cc-composer-surface">
+        <span class="notice" id="push-note">等待本机服务推送派生指标…</span>
+        <textarea rows="1" aria-label="Message Command Code" placeholder="Message Command Code"></textarea>
+        <div class="cc-composer-toolbar">
+          <div class="left">
+            <span class="cc-composer-model">deepseek/deepseek-v4.1-flash</span>
+            <span class="cc-composer-permission">Ask before edit</span>
+          </div>
+          <div class="right">
+            <span class="cc-composer-effort">High effort</span>
+            <button class="send" type="button" title="Send">↑</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Stand-in for the app's preload bridge, same field names as the host's own
+    // account overview. Values are synthetic, never a real account.
+    const OVERVIEW = {
+      user: { id: "demo", name: "preview", userName: "preview" },
+      identity: { kind: "user", name: "preview" },
+      windowLimits: {
+        limited: true,
+        fiveHour: { used: 0.223064208, cap: 3, exceeded: false, resetAt: Date.now() + 2 * 3600e3 },
+        weekly: { used: 2.800395788, cap: 6, exceeded: false, resetAt: Date.now() + 3 * 86400e3 },
+      },
+      credits: { monthlyCredits: 7.199604212, purchasedCredits: 0, freeCredits: 0, belowThreshold: false },
+      subscription: { planId: "individual-goat", status: "active" },
+      usage: {
+        totalCount: 834, completedCount: 834, failedCount: 0,
+        totalTokensIn: 350329637, totalTokensOut: 1141771, totalTokens: 351471408,
+        totalCost: 2.77562987, averageCost: 0.0033280933, successRate: 100,
+      },
+    };
+    window.electronAPI = {
+      accountOverview: async () => JSON.parse(JSON.stringify(OVERVIEW)),
+    };
+
+    // Same-origin fetch of the real local service; the production path pushes the
+    // identical payload over DevTools instead, with a version tag.
+    async function pump() {
+      try {
+        const response = await fetch("/api/live?since=0", { cache: "no-store" });
+        const payload = await response.json();
+        window.__hostTheme = payload?.host?.theme || "";
+        syncTheme();
+        const result = window.__goatUpdate?.({ ...payload, version: window.__goatWidgetVersion });
+        document.getElementById("push-note").textContent =
+          "本机服务 /api/live 已推入：生成速度、消耗率与命中率均为真实计算" +
+          (result?.ok ? "（读数条已确认，mounted=" + result.mounted + "）" : "（读数条未确认：" + JSON.stringify(result) + "）");
+      } catch (error) {
+        document.getElementById("push-note").textContent = "本机服务不可用：" + error.message;
+      }
+    }
+
+    // Mirrors what the host does on a locale switch: it rewrites <html lang>,
+    // and the readout picks the new strings up on its next heartbeat.
+    document.getElementById("lang").addEventListener("click", (event) => {
+      const zh = document.documentElement.lang.indexOf("zh") === 0;
+      document.documentElement.lang = zh ? "en" : "zh-Hans";
+      event.target.textContent = zh ? "中文" : "English";
+    });
+    /* Theme precedence: ?theme= > a manual choice in this page > the theme the
+     * host app reports through the injector > light. The system colour scheme is
+     * deliberately not a tier: this page mirrors Command Code, not the OS, and
+     * the host keeps its own theme setting independent of the OS. */
+    const THEME_KEY = "goat-preview-theme";
+    const URL_THEME = (() => {
+      const value = new URLSearchParams(location.search).get("theme");
+      return value === "light" || value === "dark" ? value : "";
+    })();
+
+    function storedTheme() {
+      try {
+        const value = localStorage.getItem(THEME_KEY);
+        return value === "light" || value === "dark" ? value : "";
+      } catch {
+        return "";
+      }
+    }
+
+    function reportedHostTheme() {
+      const value = window.__hostTheme;
+      return value === "light" || value === "dark" ? value : "";
+    }
+
+    function applyTheme(name, source) {
+      const root = document.documentElement;
+      root.dataset.theme = name;
+      root.classList.toggle("dark", name === "dark");
+      document.getElementById("theme").textContent = name === "dark" ? "简洁浅色" : "简洁深色";
+      document.getElementById("theme-source").textContent = `主题来源：${source}（${name}）`;
+    }
+
+    /* Every tier is re-read on each pass, so a source that disappears — an
+     * override cleared, the injector detached, the host not reporting a theme —
+     * resolves back down the list instead of pinning the page to its last value. */
+    function syncTheme() {
+      if (URL_THEME) {
+        applyTheme(URL_THEME, "URL 指定");
+        return;
+      }
+      const chosen = storedTheme();
+      if (chosen) {
+        applyTheme(chosen, "手动选择");
+        return;
+      }
+      const host = reportedHostTheme();
+      if (host) {
+        applyTheme(host, "跟随 Command Code");
+        return;
+      }
+      applyTheme("light", "默认浅色");
+    }
+
+    syncTheme();
+    document.getElementById("theme").addEventListener("click", () => {
+      const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem(THEME_KEY, next);
+      } catch {
+        // Private mode: the toggle still works for this page view.
+      }
+      applyTheme(next, "手动选择");
+    });
+    document.getElementById("reset-theme").addEventListener("click", () => {
+      try {
+        localStorage.removeItem(THEME_KEY);
+      } catch {
+        // ignore
+      }
+      syncTheme();
+    });
+    document.getElementById("narrow").addEventListener("click", () => {
+      document.body.style.maxWidth = document.body.style.maxWidth ? "" : "420px";
+      document.body.style.margin = "0 auto";
+    });
+
+    setInterval(pump, 2500);
+  </script>
+  <script>
+    // ?late=1 reproduces the real injection order: the DevTools preload runs
+    // before the host has rendered its composer, so the readout must retry.
+    window.__lateLog = { ran: false, composerAtInject: null, widgetAt500ms: null, widgetAt6s: null };
+    if (location.search.indexOf("late") >= 0) {
+      const feed = document.querySelector(".cc-feed-body");
+      feed.remove();
+      window.__lateLog.ran = true;
+      // Sampled inside the page so the observation cannot race the tool calls.
+      window.__lateLog.composerAtInject = Boolean(document.querySelector(".cc-composer"));
+      setTimeout(() => {
+        window.__lateLog.widgetAt500ms = Boolean(document.getElementById("goat-gauge-widget"));
+      }, 500);
+      setTimeout(() => document.body.append(feed), 2500);
+      setTimeout(() => {
+        window.__lateLog.widgetAt6s = Boolean(document.getElementById("goat-gauge-widget"));
+      }, 6000);
+    }
+  </script>
+  <script src="/widget.js"></script>
+</body>
+</html>

@@ -211,7 +211,14 @@ def _cookie_watcher(
             log(f"cookie watcher iteration failed: {type(exc).__name__}: {exc}")
 
 
-def main(*, host: str, port: int, demo: bool, open_browser: bool) -> None:
+def main(
+    *,
+    host: str,
+    port: int,
+    demo: bool,
+    open_browser: bool,
+    inject: bool = False,
+) -> None:
     service = GaugeService(demo=demo)
     bound_host, bound_port = start_server(
         host=host,
@@ -224,6 +231,11 @@ def main(*, host: str, port: int, demo: bool, open_browser: bool) -> None:
     service.set_browser_session_reader(read_chrome_cookies)
 
     stop_event = threading.Event()
+    if inject:
+        from .inject import start_injection
+
+        start_injection(service, stop_event)
+        log("widget injection loop started")
     watcher = threading.Thread(
         target=_cookie_watcher,
         args=(service, stop_event),
