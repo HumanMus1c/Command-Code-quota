@@ -140,6 +140,7 @@
     pushed: null,
     pushedAt: 0,
     pushedMode: "",
+    pushedMode: "",
     serverOffset: 0,
     timer: null,
     polling: false,
@@ -681,6 +682,30 @@
     }
   }
 
+  /* The host ships Tailwind-style channel values ("134 61% 67%", sometimes with
+   * " / alpha"), which are only usable once wrapped in a color function. Dropping
+   * one straight into `background:` is an invalid declaration the browser throws
+   * away, so the dot and the progress fill render transparent and nothing errors. */
+  const CHANNELS = /^[-0-9.]+\s+[-0-9.]+%\s+[-0-9.]+%(\s*\/\s*[-0-9.]+)?$/;
+  const USABLE = /^(#[0-9a-f]{3,8}|rgba?\(|hsla?\(|oklch\(|color-mix\(|currentcolor|transparent|white|black|inherit)/i;
+
+  function usableColor(value, fallback) {
+    const raw = String(value === null || value === undefined ? "" : value).trim();
+    if (!raw) {
+      return fallback;
+    }
+    if (USABLE.test(raw)) {
+      return raw;
+    }
+    if (CHANNELS.test(raw)) {
+      return `hsl(${raw.replace(/\s*\/\s*/, " / ")})`;
+    }
+    if (/^[-0-9.]+$/.test(raw)) {
+      return `hsl(${raw} 60% 55%)`;  // a bare hue channel
+    }
+    return fallback;
+  }
+
   function applyTheme(node) {
     let computed = null;
     try {
@@ -701,7 +726,7 @@
         }
       }
       const fallback = entry[3] && dark ? entry[3] : entry[2];
-      node.style.setProperty(entry[0], value || fallback);
+      node.style.setProperty(entry[0], usableColor(value, fallback));
     }
     node.dataset.dark = dark ? "1" : "0";
   }
