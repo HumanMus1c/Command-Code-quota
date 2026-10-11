@@ -9,11 +9,12 @@
 (() => {
   "use strict";
 
-  const VERSION = "4";
+  const VERSION = "5";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
   const STORAGE_KEY = "goat-gauge-layout-v2";
+  const PERIOD_KEY = "goat-gauge-period-v1";
 
   if (window.__goatWidgetVersion === VERSION && document.getElementById(ID)) {
     return;
@@ -424,6 +425,7 @@
     const limits = (overview && overview.windowLimits) || {};
     const credits = (overview && overview.credits) || {};
     const usage = (overview && overview.usage) || {};
+    const subscription = (overview && overview.subscription) || {};
     return {
       five: limits.fiveHour || null,
       week: limits.weekly || null,
@@ -433,12 +435,105 @@
           (credits.purchasedCredits || 0) +
           (credits.freeCredits || 0)
         : null,
+      // The host reports no monthly ceiling at all: subscription only carries
+      // planId/status/period dates, and the "plan" bridge methods are agent plan
+      // files. So the period boundary is what we have to anchor an estimate to.
+      periodStart: String(subscription.currentPeriodStart || ""),
+      periodEnd: Date.parse(subscription.currentPeriodEnd || "") || 0,
       requests: usage.totalCount,
       tokens: usage.totalTokens,
+      outputTokens: usage.totalTokensOut,
       cost: usage.totalCost,
       average: usage.averageCost,
       success: usage.successRate,
     };
+  }
+
+  /* Ceiling for the monthly meter, in order of trustworthiness: the plan cap the
+   * local service knows from the billing API, then the largest remaining balance
+   * observed inside the current billing period - which is the allowance itself
+   * once the period has just rolled over. Both are labelled identically to the
+   * other meters; nothing is invented out of thin air. */
+  function monthlyCap(host) {
+    const pushed = pushedMonthly();
+    if (isFinite(pushed.cap) && pushed.cap > 0) {
+      return pushed.cap;
+    }
+    if (!host.periodStart || !isFinite(host.monthly)) {
+      return NaN;
+    }
+    let record = null;
+    try {
+      record = JSON.parse(localStorage.getItem(PERIOD_KEY) || "null");
+    } catch {
+      record = null;
+    }
+    if (!record || record.start !== host.periodStart || !isFinite(Number(record.cap))) {
+      record = { start: host.periodStart, cap: host.monthly };
+    } else {
+      record.cap = Math.max(Number(record.cap), host.monthly);
+    }
+    try {
+      localStorage.setItem(PERIOD_KEY, JSON.stringify(record));
+    } catch {
+      /* nothing to do: the estimate simply restarts next poll */
+    }
+    return Number(record.cap);
+  }
+
+  /* Credits per hour is a wall-clock rate by definition. tok/s and throughput
+   * are not: the host reports no timing at all, so they are normalised over the
+   * intervals where counters actually advanced (busy time), never over idle
+   * gaps that would deflate them by an order of magnitude (D-7). */
+  const MIN_BURN_MS = 120000;
+
+  function derivedRates() {
+    const span = state.samples;
+    if (span.length < 2) {
+      return {};
+    }
+    const first = span[0];
+    const last = span[span.length - 1];
+    const hours = (last.at - first.at) / 3600e3;
+    if (!(hours > 0) || last.at - first.at < MIN_BURN_MS) {
+      return {};
+    }
+    let busyMs = 0;
+    let output = 0;
+    let requests = 0;
+    for (let index = 1; index < span.length; index += 1) {
+      const deltaOut = span[index].out - span[index - 1].out;
+      const deltaReq = span[index].reqs - span[index - 1].reqs;
+      const deltaMs = span[index].at - span[index - 1].at;
+      if (deltaOut > 0 || deltaReq > 0) {
+        busyMs += deltaMs;
+        output += Math.max(0, deltaOut);
+        requests += Math.max(0, deltaReq);
+      }
+    }
+    const used = last.five - first.five;
+    return {
+      burn: used >= 0 ? used / hours : NaN,
+      tokens_per_sec: busyMs > 0 && output > 0 ? output / (busyMs / 1000) : NaN,
+      requests_per_min: busyMs > 0 && requests > 0 ? requests / (busyMs / 60000) : NaN,
+    };
+  }
+
+  function recordSample(host) {
+    const five = host && host.five ? Number(host.five.used) : NaN;
+    const out = Number(host.outputTokens);
+    const reqs = Number(host.requests);
+    if (!isFinite(five)) {
+      return;
+    }
+    const last = state.samples[state.samples.length - 1];
+    if (last && (five < last.five - 1e-9 || out < last.out - 1e-9 || reqs < last.reqs - 1e-9)) {
+      state.samples = [];  // window or account reset: the old span proves nothing
+    }
+    state.samples.push({ at: now(), five, out: isFinite(out) ? out : 0, reqs: isFinite(reqs) ? reqs : 0 });
+    if (state.samples.length > 60) {
+      state.samples.shift();
+    }
   }
 
   function pushedMonthly() {
@@ -458,16 +553,17 @@
         if (!host || !isFinite(host.monthly)) {
           return "";
         }
-        const monthly = pushedMonthly();
-        if (isFinite(monthly.cap) && monthly.cap > 0) {
-          return meterChip("month", L.month, Math.max(0, monthly.cap - host.monthly), monthly.cap, monthly.reset_at);
+        const cap = monthlyCap(host);
+        const reset = host.periodEnd || pushedMonthly().reset_at;
+        if (isFinite(cap) && cap > 0) {
+          return meterChip("month", L.month, Math.max(0, cap - host.monthly), cap, reset);
         }
-        // No ceiling from the host overview, so show the remainder without a
-        // bar rather than inventing a denominator to fill one.
+        // Still no ceiling by either route: show the remainder without a bar
+        // rather than inventing a denominator to fill one.
         return (
           `<span class="chip meter" data-metric="month"><b>${L.month}</b>` +
           `<em>${trim(host.monthly)} ${L.remaining}</em>` +
-          `<span class="cd">${countdown(monthly.reset_at)}</span>${chrome("month")}</span>`
+          `<span class="cd">${countdown(reset)}</span>${chrome("month")}</span>`
         );
       }
       case "gen":
@@ -1045,38 +1141,6 @@
     });
   }
 
-  /* Credits burned per hour is by definition a wall-clock rate, so a sampled
-   * difference of the host's own counter is the correct maths. tok/s is not:
-   * it needs per-request streaming time, which the host never reports, so it
-   * stays a service-only metric instead of being guessed from wall clock (D-7). */
-  function recordSample(host) {
-    const used = host && host.five ? Number(host.five.used) : NaN;
-    if (!isFinite(used)) {
-      return;
-    }
-    const last = state.samples[state.samples.length - 1];
-    if (last && used < last.five - 1e-9) {
-      state.samples = [];  // window reset: the previous span says nothing about this one
-    }
-    state.samples.push({ at: now(), five: used });
-    if (state.samples.length > 40) {
-      state.samples.shift();
-    }
-  }
-
-  function sampledBurn() {
-    if (state.samples.length < 2) {
-      return NaN;
-    }
-    const first = state.samples[0];
-    const last = state.samples[state.samples.length - 1];
-    const hours = (last.at - first.at) / 3600e3;
-    if (!(hours >= 5 / 60) || last.five - first.five < 0) {
-      return NaN;  // warm-up: never extrapolate a rate from a two-second span
-    }
-    return (last.five - first.five) / hours;
-  }
-
   function cacheHit(stats) {
     const tokens = stats && stats.tokens;
     if (!tokens) {
@@ -1092,10 +1156,12 @@
 
   function rates() {
     const pushed = (state.pushed && state.pushed.rates) || {};
+    const derived = derivedRates();
     const hit = Number(pushed.hit_rate_pct);
+    const pick = (name, value) => (isFinite(Number(value)) ? Number(value) : Number(derived[name]));
     return {
-      tokens_per_sec: Number(pushed.tokens_per_sec),
-      requests_per_min: Number(pushed.requests_per_min),
+      tokens_per_sec: pick("tokens_per_sec", pushed.tokens_per_sec),
+      requests_per_min: pick("requests_per_min", pushed.requests_per_min),
       hit_rate_pct: isFinite(hit) ? hit : cacheHit(state.stats),
     };
   }
@@ -1106,8 +1172,8 @@
     if (isFinite(burn)) {
       return { five_hour: { burn_per_hour: burn, verdict: pushed.verdict } };
     }
-    const sampled = sampledBurn();
-    return { five_hour: isFinite(sampled) ? { burn_per_hour: sampled } : {} };
+    const derived = Number(derivedRates().burn);
+    return { five_hour: isFinite(derived) ? { burn_per_hour: derived } : {} };
   }
 
   async function pullHost() {
@@ -1275,7 +1341,7 @@
       : "";
     const measured = row ? Math.round(row.scrollWidth) : 0;
     const height = row ? Math.round(row.clientHeight) : 0;
-    const burn = sampledBurn();
+    const burn = Number(derivedRates().burn);
     return [
       node.dataset.state,
       node.dataset.layout,

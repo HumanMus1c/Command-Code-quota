@@ -136,7 +136,11 @@
         weekly: { used: 2.800395788, cap: 6, exceeded: false, resetAt: Date.now() + 3 * 86400e3 },
       },
       credits: { monthlyCredits: 7.199604212, purchasedCredits: 0, freeCredits: 0, belowThreshold: false },
-      subscription: { planId: "individual-goat", status: "active" },
+      subscription: {
+        planId: "individual-goat", status: "active",
+        currentPeriodStart: new Date(Date.now() - 6 * 86400e3).toISOString(),
+        currentPeriodEnd: new Date(Date.now() + 24 * 86400e3).toISOString(),
+      },
       usage: {
         totalCount: 834, completedCount: 834, failedCount: 0,
         totalTokensIn: 350329637, totalTokensOut: 1141771, totalTokens: 351471408,
