@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "11";
+  const VERSION = "12";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -140,7 +140,6 @@
     pushed: null,
     pushedAt: 0,
     pushedMode: "",
-    pushedMode: "",
     serverOffset: 0,
     timer: null,
     polling: false,
@@ -150,7 +149,10 @@
     mountedIn: null,
     slots: [],
     shapeChanges: [],
-    layoutWas: "full",
+    shedLevel: -1,
+    shedChanges: [],
+    levelChanges: 0,
+    climb: true,
     // Spec A-5: each await below is checked against this generation, so a reply
     // that lands after a thread switch can never paint the previous conversation.
     generation: 0,
@@ -751,6 +753,9 @@
         });
       }
       row.innerHTML = parts.join("");
+      // A rebuild hands back every countdown and bar, so the level the row holds no
+      // longer matches the one we recorded: re-judge it from the single line down.
+      state.climb = true;
       // Slots are taken from what the DOM actually holds, so a substrate that
       // models fewer elements than we generated (the string-level shim) keeps
       // taking the full-write path instead of patching the wrong node.
@@ -901,36 +906,47 @@
    * lines within a height budget, then the countdowns and bars inside the
    * meters, then the height budget itself. Which metrics are on the board is
    * decided by the saved layout alone, never by the viewport, so the readout
-   * and the editor always show the same set. */
+   * and the editor always show the same set.
+   *
+   * Presentation pressure is one number: the shed level. -1 is the single line,
+   * 0..N means N decorations are hidden in priority order, and once every
+   * decoration is gone the height budget goes instead. A poll only reads the
+   * measurement and steps the level down when the row proves it is overflowing,
+   * so a board whose width did not change writes no class at all. Climbing back
+   * up costs the width a lower level would need, which can only be measured by
+   * un-shedding first - so that happens on a real resize or a rebuilt row, never
+   * per poll. */
   function fit(root, node) {
     const row = root.getElementById("row");
-    // Shedding is presentation only - a class, never a removal. Nodes stay put so
-    // an unchanged rebuild can be skipped, and widening hands the countdowns and
-    // bars straight back instead of waiting for the next full render.
-    for (const decoration of row.querySelectorAll(".cd.shed, .bar.shed")) {
-      decoration.classList.remove("shed");
+    let level = state.shedLevel;
+    if (state.climb || level < 0) {
+      // Force the no-wrap state before measuring: scrollWidth is only an honest
+      // "does it fit on one line" reading while the row is not already wrapping.
+      setData(node, "layout", "full");
+      const spare = row.clientWidth - row.scrollWidth;
+      // Staying on one line costs nothing; returning to it needs 12px of slack, so
+      // a width sitting on the boundary cannot oscillate between tiers.
+      if (spare >= (level < 0 ? -1 : 12)) {
+        applyLevel(row, 0);
+        setLevel(-1);
+        state.climb = false;
+        guardAgainstHost(node, row);
+        return;
+      }
+      level = 0;
+      applyLevel(row, 0);
+      state.climb = false;
+      setData(node, "layout", "wrapped");
     }
-    // Force the no-wrap state before measuring: scrollWidth is only an honest
-    // "does it fit on one line" reading while the row is not already wrapping.
-    setData(node, "layout", "full");
-    const spare = row.clientWidth - row.scrollWidth;
-    // Staying on one line costs nothing; returning to it needs 12px of slack, so a
-    // width sitting on the boundary cannot oscillate between tiers.
-    const needed = state.layoutWas === "full" ? -1 : 12;
-    if (spare >= needed) {
-      state.layoutWas = "full";
-      guardAgainstHost(node, row);
-      return;
-    }
-    setData(node, "layout", "wrapped");
     while (row.scrollHeight > row.clientHeight + 1) {
-      if (!shedOne(row)) {
+      if (!applyLevel(row, level + 1)) {
         // Nothing left to shed but the budget; grow instead of dropping data.
         setData(node, "layout", "tall");
         break;
       }
+      level += 1;
     }
-    state.layoutWas = node.dataset.layout;
+    setLevel(level);
     guardAgainstHost(node, row);
   }
 
@@ -938,20 +954,39 @@
     return [...row.querySelectorAll(".chip")];
   }
 
-  /* Only presentation degrades: countdowns first, then bars, always keeping
-   * every metric. Dropping whole chips here is what made the board show a
-   * different set of metrics than the editor offers at the same width. */
-  function shedOne(row) {
+  function decorations(row) {
+    const items = [];
     for (const selector of [".cd", ".bar"]) {
-      const pending = [...row.querySelectorAll(selector)].filter(
-        (decoration) => !decoration.classList.contains("shed")
-      );
-      if (pending.length) {
-        pending[0].classList.add("shed");
-        return true;
-      }
+      items.push(...row.querySelectorAll(selector));
     }
-    return false;
+    return items;
+  }
+
+  /* One guarded write per decoration whose shed state really differs, so asking
+   * for the level the row already holds changes nothing. False means the row
+   * cannot be degraded any further: every decoration is already shed. */
+  function applyLevel(row, level) {
+    const items = decorations(row);
+    if (level > items.length) {
+      return false;
+    }
+    items.forEach((decoration, index) => setFlag(decoration, "shed", index < level));
+    return true;
+  }
+
+  /* A level change is the only thing that may cost classes on the board, so it
+   * names itself instead of being inferred from a MutationObserver count. The
+   * list is bounded, the counter is not: an idle window has to be provable as
+   * "the level never moved" even after the ring buffer filled up. */
+  function setLevel(level) {
+    if (level === state.shedLevel) {
+      return;
+    }
+    state.levelChanges += 1;
+    if (state.shedChanges.length < 4) {
+      state.shedChanges.push({ from: state.shedLevel, to: level });
+    }
+    state.shedLevel = level;
   }
 
   function isProtected(chipNode) {
@@ -1126,6 +1161,9 @@
     fitQueued = true;
     const step = () => {
       fitQueued = false;
+      // The width itself moved, which is the one event that can buy presentation
+      // back, so this is where climbing is allowed to measure the lower levels.
+      state.climb = true;
       render();
     };
     if (typeof requestAnimationFrame === "function") {
@@ -1568,6 +1606,7 @@
       String((document.documentElement || {}).lang || ""),
       node.dataset.dark,
       node.inert ? "inert" : "live",
+      `L${state.shedLevel}`,
       board,
       `w${measured}xh${height}`,
       `src=${state.pushed ? "push:" + state.pushedMode : "-"}+${state.host ? "host" : "-"}+${isFinite(burn) ? "sample" : "-"}` +
@@ -1589,6 +1628,9 @@
     session: state.threadId ? "known" : "none",
     statsAt: state.statsAt,
     shapeChanges: state.shapeChanges,
+    shedLevel: state.shedLevel,
+    shedChanges: state.shedChanges,
+    levelChanges: state.levelChanges,
   });
 
   // Scriptable surface for the injector and for tests; also the only way to
