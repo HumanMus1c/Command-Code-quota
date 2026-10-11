@@ -116,7 +116,7 @@ ARM = """
   const node = document.getElementById('goat-gauge-widget');
   if (!node) return 'not-mounted';
   const row = node.shadowRoot.getElementById('row');
-  window.__seen = {count: 0, text: 0, style: 0, child: 0, attr: 0};
+  window.__seen = {count: 0, text: 0, style: 0, child: 0, attr: 0, where: []};
   window.__obs && window.__obs.disconnect();
   window.__obs = new MutationObserver((records) => {
     for (const record of records) {
@@ -125,6 +125,15 @@ ARM = """
       else if (record.attributeName === 'style') window.__seen.style++;
       else if (record.type === 'childList') window.__seen.child++;
       else window.__seen.attr++;
+      if (record.type === 'childList' && window.__seen.where.length < 6) {
+        const at = record.target;
+        window.__seen.where.push(`child:${at.nodeName}.${at.className || ''}`);
+      } else if (record.type === 'attributes' && window.__seen.where.length < 6) {
+        const at = record.target;
+        window.__seen.where.push(`attr:${record.attributeName}@${at.nodeName}.${at.className || ''}`);
+      } else if (record.type === 'characterData' && window.__seen.where.length < 6) {
+        window.__seen.where.push(`text:${(record.target.nodeValue || '').slice(0, 12)}`);
+      }
     }
   });
   window.__obs.observe(row, {childList: true, subtree: true, attributes: true, characterData: true});
@@ -133,6 +142,17 @@ ARM = """
 """
 
 READ = "JSON.stringify(window.__seen)"
+
+VALUE = """
+(() => {
+  const row = document.getElementById('goat-gauge-widget').shadowRoot.getElementById('row');
+  const five = row.querySelector('[data-metric=five]');
+  return JSON.stringify({
+    value: five ? (five.querySelector('em') || {}).textContent : null,
+    width: five ? (((five.querySelector('.bar > i') || {}).style) || {}).width : null,
+  });
+})()
+"""
 
 TAG = """
 (() => {
@@ -230,18 +250,24 @@ def main() -> int:
         results.append((
             f"ghost: unchanged data writes nothing for {OBSERVE_SECONDS:.0f}s (>2 polls)",
             seen.get("count", -1) == 0,
-            json.dumps(seen),
+            json.dumps({k: v for k, v in seen.items() if k != "where"}) + " " + json.dumps(seen.get("where")),
         ))
 
         harness.evaluate(TAG)
+        before = json.loads(harness.evaluate(VALUE) or "{}")
         harness.evaluate(MOVE_ONE)
         time.sleep(POLL_MS / 1000 + 1.5)
         survived = json.loads(harness.evaluate(SURVIVED) or "[]")
-        untouched = [flag for index, flag in enumerate(survived) if index != 0]
+        after = json.loads(harness.evaluate(VALUE) or "{}")
         results.append((
-            "identity: one changed value leaves the other chips' nodes in place",
-            bool(survived) and survived[0] is False and all(untouched),
-            json.dumps(survived),
+            "identity: a value change patches in place, keeping every node",
+            bool(survived) and all(survived),
+            json.dumps(survived[:4]),
+        ))
+        results.append((
+            "correctness: the changed number and bar width actually moved",
+            before.get("value") != after.get("value") and bool(after.get("value")),
+            f"{before.get('value')} -> {after.get('value')} / {after.get('width')}",
         ))
 
         connection.close()

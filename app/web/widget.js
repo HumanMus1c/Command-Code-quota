@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "10";
+  const VERSION = "11";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -148,7 +148,7 @@
     observer: null,
     resizer: null,
     mountedIn: null,
-    lastMarkup: "",
+    slots: [],
     layoutWas: "full",
     // Spec A-5: each await below is checked against this generation, so a reply
     // that lands after a thread switch can never paint the previous conversation.
@@ -631,12 +631,12 @@
     const L = locale();
     const busy = fresh.state === "empty" || fresh.state === "error" ? "true" : "false";
     if (!layout.editing) {
-      return (
+      return [
         `<span class="chip dot" data-state="${fresh.state}" title="${fresh.text}"` +
-        ` aria-label="${fresh.text}"><i aria-hidden="true"></i></span>` +
+        ` aria-label="${fresh.text}"><i aria-hidden="true"></i></span>`,
         `<button class="tool" type="button" data-act="edit" title="${L.edit}"` +
-        ` aria-label="${L.edit}" aria-busy="${busy}">⚙</button>`
-      );
+        ` aria-label="${L.edit}" aria-busy="${busy}">⚙</button>`,
+      ];
     }
     const hidden = layout.hidden.filter((id) => DEFAULT_ORDER.indexOf(id) >= 0);
     const picker = layout.picker
@@ -651,15 +651,119 @@
             : `<span class="pick empty">${L.noHidden}</span>`
         }</span>`
       : "";
-    return (
+    return [
       `<span class="chip dot" data-state="${fresh.state}" title="${fresh.text}"` +
-      ` aria-label="${fresh.text}"><i></i></span>` +
+      ` aria-label="${fresh.text}"><i></i></span>`,
       `<span class="tools"><span class="picker-wrap">${picker}` +
       `<button class="tool" type="button" data-act="add" title="${L.add}" aria-label="${L.add}"` +
       ` aria-haspopup="true" aria-expanded="${layout.picker ? "true" : "false"}">${L.add} ▾</button></span>` +
       `<button class="tool" type="button" data-act="cancel">${L.cancel}</button>` +
-      `<button class="tool primary" type="button" data-act="save">${L.save}</button></span>`
-    );
+      `<button class="tool primary" type="button" data-act="save">${L.save}</button></span>`,
+    ];
+  }
+
+  const partKey = (markup) => {
+    const metric = /data-metric="([^"]+)"/.exec(markup);
+    if (metric) {
+      return metric[1];
+    }
+    const act = /data-act="([^"]+)"/.exec(markup);
+    if (act) {
+      return `act:${act[1]}`;
+    }
+    const cls = /class="([^"]*)"/.exec(markup);
+    return cls ? `.${cls[1].split(" ")[0]}` : markup.slice(0, 16);
+  };
+
+  /* Patch the existing element instead of replacing it: the node survives, so the
+   * bar's width transition continues from its previous value instead of restarting
+   * from zero - which is the flicker a whole-chip swap still causes. */
+  function patchNode(target, source) {
+    for (const name of source.getAttributeNames()) {
+      if (name === "class" || name === "style") {
+        continue;
+      }
+      setAttr(target, name, source.getAttribute(name));
+    }
+    for (const name of target.getAttributeNames()) {
+      if (name === "class" || name === "style" || source.hasAttribute(name)) {
+        continue;
+      }
+      target.removeAttribute(name);
+    }
+    for (const cls of source.classList) {
+      setFlag(target, cls, true);
+    }
+    for (const cls of [...target.classList]) {
+      if (cls !== "shed") {
+        setFlag(target, cls, source.classList.contains(cls));
+      }
+    }
+    const style = source.getAttribute("style") || "";
+    setAttr(target, "style", style);
+
+    const wanted = [...source.childNodes];
+    const current = [...target.childNodes];
+    if (wanted.length === 1 && wanted[0].nodeType === 3) {
+      const text = wanted[0].nodeValue;
+      if (target.textContent !== text) {
+        target.textContent = text;
+      }
+      return;
+    }
+    if (wanted.length !== current.length) {
+      target.innerHTML = source.innerHTML;
+      return;
+    }
+    wanted.forEach((node, index) => {
+      const twin = current[index];
+      if (node.nodeType === 3 && twin.nodeType === 3) {
+        if (twin.nodeValue !== node.nodeValue) {
+          twin.nodeValue = node.nodeValue;
+        }
+      } else if (node.nodeType === 1 && twin.nodeType === 1) {
+        patchNode(twin, node);
+      } else {
+        target.innerHTML = source.innerHTML;
+      }
+    });
+  }
+
+  /* One slot per top-level element, keyed by metric. Shape changes (mount, edit
+   * mode, layout save) still take the full write; a data change only touches the
+   * slots whose generated markup differs, and even then patches in place.
+   * Generated strings are compared against generated strings - never against
+   * outerHTML - because shedding adds classes to descendants afterwards. */
+  function paint(row, parts) {
+    const keys = parts.map(partKey);
+    const previous = state.slots;
+    const sameShape =
+      previous.length === parts.length && previous.every((slot, index) => slot.key === keys[index]);
+    if (!sameShape) {
+      row.innerHTML = parts.join("");
+      // Slots are taken from what the DOM actually holds, so a substrate that
+      // models fewer elements than we generated (the string-level shim) keeps
+      // taking the full-write path instead of patching the wrong node.
+      state.slots = [...row.children].map((child, index) => {
+        const outer = typeof child.outerHTML === "string" ? child.outerHTML : "";
+        return { key: partKey(outer || parts[index] || ""), markup: outer };
+      });
+      return;
+    }
+    parts.forEach((markup, index) => {
+      const slot = previous[index];
+      if (slot.markup === markup) {
+        return;
+      }
+      slot.markup = markup;
+      const holder = document.createElement("div");
+      holder.innerHTML = markup;
+      const source = holder.firstElementChild;
+      const target = row.children[index];
+      if (source && target) {
+        patchNode(target, source);
+      }
+    });
   }
 
   function render() {
@@ -689,7 +793,7 @@
     }
 
     const fresh = freshness();
-    parts.push(toolsHtml(fresh));
+    parts.push(...toolsHtml(fresh));
 
     if (!host && !state.pushed) {
       parts.unshift(`<span class="chip muted" data-metric="waiting"><em>${L.waiting}</em></span>`);
@@ -700,13 +804,7 @@
     // Only touch the DOM when the board actually changed: rewriting the row every
     // poll destroyed and rebuilt every chip, restarted each bar's width transition
     // from zero, and is what read as ghosting on the host.
-    const markup = parts.join("");
-    const unchanged = markup === state.lastMarkup && node.dataset.state === fresh.state &&
-      node.dataset.edit === (layout.editing ? "on" : "off");
-    state.lastMarkup = markup;
-    if (!unchanged) {
-      row.innerHTML = markup;
-    }
+    paint(row, parts);
     setData(node, "state", fresh.state);
     setData(node, "edit", layout.editing ? "on" : "off");
     setAttr(node, "aria-label", L.aria);
