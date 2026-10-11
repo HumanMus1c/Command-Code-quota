@@ -47,7 +47,11 @@ def main() -> None:
     if args.watch or args.status or args.launch or args.probe:
         from app.watchdog import main as watchdog_main
 
-        chosen = "--watch"
+        # --watch is the public name (it is what the HKCU Run key stores); the
+        # watchdog's own loop is called --follow. Forwarding the public name here
+        # made argparse reject it, so the login autostart died before the first
+        # poll while every other mode flag worked.
+        chosen = "--follow"
         if args.status:
             chosen = "--status"
         elif args.launch:

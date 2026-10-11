@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import unittest
@@ -370,6 +371,46 @@ def _connection_factory(value):
             pass
 
     return Connection
+
+
+class EntryCLITests(unittest.TestCase):
+    """entry.py and the watchdog are two argparse surfaces that have to agree.
+
+    The HKCU Run key stores `entry.py --watch`, so a flag that one side forwards and
+    the other does not recognise kills the login autostart before the first poll -
+    while every other mode flag keeps working, which is why it survives a manual run.
+    """
+
+    def forwarded(self, argv: list[str]) -> list[str]:
+        import entry
+
+        calls: list[list[str]] = []
+
+        def record(argv_inner: list[str]) -> int:
+            calls.append(list(argv_inner))
+            return 0
+
+        with mock.patch.object(sys, "argv", ["entry.py", *argv]), mock.patch(
+            "app.watchdog.main", record
+        ):
+            with self.assertRaises(SystemExit):
+                entry.main()
+        self.assertEqual(len(calls), 1, f"{argv} reached the watchdog exactly once")
+        return calls[0]
+
+    def test_watch_forwards_a_flag_the_watchdog_parses(self) -> None:
+        forwarded = self.forwarded(["--watch"])
+        with mock.patch.object(watchdog, "follow", lambda *a, **k: 0):
+            self.assertEqual(watchdog.main(forwarded), 0)
+
+    def test_every_mode_flag_maps_to_a_parsed_flag(self) -> None:
+        for argv, expected in (
+            (["--status"], ["--status"]),
+            (["--launch"], ["--launch"]),
+            (["--probe"], ["--probe"]),
+            (["--watch"], ["--follow"]),
+        ):
+            self.assertEqual(self.forwarded(argv), expected, argv[0])
 
 
 if __name__ == "__main__":
