@@ -45,8 +45,17 @@
   按 origin 比较会既不挂载又零报错（`app/inject.py:66-79` 的 `origin_of()` 已按此实现）。
 - **N-4 全页只允许一份读数条**，且必须在 open Shadow DOM 内（`widget.js:851` `attachShadow({mode:"open"})`）。
   样式走 `style.textContent`（`style-src` 已允许 `'unsafe-inline'`），不注入宿主 `<head>`。
-- **N-5 几何优先于覆盖。** 与宿主可点击控件矩形相交、或窄到放不下一个胶囊时，整体 `visibility:hidden` + `inert`
-  （`blocked`），**绝不覆盖宿主控件、绝不改宿主任何分支的 flex/min-width**。dispose 前后宿主内联样式必须逐字节相同。
+- **N-5 几何优先于覆盖。** 窄到放不下一个胶囊、或宿主可点击控件被真实遮挡时，整体隐藏（`blocked`），
+  **绝不覆盖宿主控件、绝不改宿主任何分支的 flex/min-width**。dispose 前后宿主内联样式必须逐字节相同。
+  两条**当前代码尚未满足**：
+  - 遮挡判定要用**实际命中测试**而不是纯矩形相交：先过滤不相交矩形，再在交集中心与四角做
+    `document.elementFromPoint`，只有打到宿主控件本身才算遮挡。纯几何会双向误判——按钮矩形与条相交但
+    命中测试落到输入框（该显示却隐藏），以及浮动且实际绘制在交集处的按钮（该隐藏却没隐藏）。
+    上游同类复核结论见 `docs/ROBUSTNESS.md:97-99`。
+  - `blocked` 必须同时置 `inert` 与 `aria-hidden="true"`。现在只有 `widget.js:646` 的
+    `visibility:hidden;pointer-events:none`，读屏仍会念出一条看不见的条、Tab 仍可能落进隐藏胶囊。
+    **README 声称的"并置 `inert`"与代码不符**（`widget.js` 全文 `inert` 零命中），以本条为准：要么补齐代码，
+    要么修正 README，二者不得继续分叉。
 - **N-6 调试端口最小暴露**：宿主侧只用 `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1`
   （随机端口 + 显式环回）。实际端口**只能**从 `%APPDATA%\Command Code\DevToolsActivePort` 首行读取
   （`inject.py:87-97`），禁止在脚本里写死端口号。发现与请求必须绕过系统代理，且拒绝任何非环回的
@@ -61,7 +70,9 @@
 - **A-2 歧义即拒绝挂载**（当前代码**尚未**满足：`widget.js:632/733/866` 用 `querySelector` 取首个匹配）。
   候选多于 1 个时必须当作"无法确定归属"，本轮不挂载，等下一次心跳；不允许猜第一个。
 - **A-3 可见性判定是挂载前置**：`isConnected` + 不在 `[hidden]/[inert]` 内 + `getClientRects().length > 0`
-  + `visibility !== 'hidden'`。
+  + `visibility !== 'hidden'`（上游四条件见 `ide/surface.cjs:5`）。当前代码**尚未**满足：
+  `widget.js:632/733/866` 直接 `querySelector` 取锚点，没有对候选做可见性过滤——不可见的节点会被当成有效锚点，
+  挂上去之后几何校验只能事后 `blocked` 兜底，白占一次布局。
 - **A-4 重挂载靠 MutationObserver + 1 秒心跳双保险**（`widget.js:940-942`），启动顺序上脚本可能早于
   `.cc-composer` 出现——预览页 `?late=1` 就是专门复现该顺序的夹具，改动挂载逻辑必须跑它。
 - **A-5 异步结果必须带请求代次**（当前代码**尚未**满足：读数条改走 D2 后 `electronAPI.*` 全是异步 Promise，
@@ -94,6 +105,10 @@
 - **D-6 单位符号不进语言表**（`cr/h`、`tok/s`、`h`/`m`/`d`），两种语言下一致；标签不得与宿主已有标签撞名。
 - **D-7 吞吐归一口径**：生成速度按请求实际流式时长（`Σ duration_ms`）归一，**不是**首末记录墙钟跨度
   ——后者把空闲间隙算进分母，会低估一个量级。
+- **D-8 诊断自述按账号隔离且不猜测**：`probe.json` 一类自述写入
+  `%LOCALAPPDATA%\GOATGauge\<accountHash>\`，哈希 = `sha256(userId)` 前 12 位。哈希隔离
+  **不等于匿名化**（同哈希可跨文件关联，不许在 README 里写成隐私声明）；确认不了当前账号时**不猜、不写、
+  不读别的账号目录**，离线启动也无法确认就整段跳过（上游同一立场：`docs/ROBUSTNESS.md:125,127`）。
 
 ## 5. 生命周期（守护进程）
 
@@ -143,6 +158,19 @@
   验收规则：**动效/布局类改动必须给出改动前后两份指纹的差异**；生命周期日志全绿而屏上零效果不算跑通
   （对应既有教训"begin/done 日志全绿也可能屏上零效果"）。
   指纹只允许含数值、布尔与自有类名——**不含账号数据、模型名、路径、宿主文本**。
+- **P-8 无障碍语义必须显式声明**（当前代码只有一处 `widget.js:849` 的 `role="group"` 加若干 `aria-label`，
+  进度条与遮挡态都缺语义）：
+  - 计量条：`role="progressbar"` + `aria-valuemin="0"` + `aria-valuemax`=实际 cap + `aria-valuenow`=实际 used
+    + `aria-label`=指标名；再加 `aria-valuetext` 整句（如"本周已用 4，共 6"），避免读屏把 `4/6` 念成"四比六"。
+  - 等待宿主数据期间给交互按钮 `aria-busy="true"`；`aria-haspopup`/`aria-expanded` 已在
+    （`widget.js:488`），下拉开合必须同步这两个值。
+  - 齿轮、`×`、`添加` 保持原生 `<button type="button">`（已是）且各有中英文可访问名；
+    `widget.js` 全文 `focus` 零命中 ⇒ 焦点可见性目前完全依赖浏览器默认样式，
+    读数条在宿主深浅两套底色上都必须能看见当前焦点。
+  - 语言切换时所有 `aria-label`/`aria-valuetext` 随词表一起重绘——整行重绘天然满足，写死成条款以防将来
+    改成局部更新时漏掉。
+  - `prefers-reduced-motion` 继续生效（`widget.js:705` 已用 `transition:none!important`），
+    后续若加降级过渡动画，不得用 JS 动画绕过这条媒体查询。
 
 ## 7. 故障 × 防护 × 验证
 
@@ -153,6 +181,12 @@
 | 脚本早于 `.cc-composer` 执行 | 心跳重试挂载 | 预览页 `?late=1` 夹具 |
 | 宿主重渲染拆掉节点 | MutationObserver + 1 秒心跳重新锚定，保证全页一份 | `test_widget.py` |
 | 候选 composer 多于一个 | 拒绝挂载，等下一轮（**待实现**，见 A-2） | 多节点 fixture |
+| 锚点存在但不可见 | 先按四条件过滤候选再判歧义（**待实现**，见 A-3） | 隐藏面板内的第二个 composer fixture |
+| 切换 thread 时旧响应晚到 | 代次 + 会话标识双校验才写状态；异常/`finally` 不改新会话（**待实现**，见 A-5） | 晚到响应、异常、卸载三个 fixture |
+| 锁文件 / `probe.json` 半写或损坏 | 同目录 temp → `os.replace`；损坏 JSON 忽略并继续显示，注明未保存（见 L-6） | 并发写入、截断文件、磁盘失败用例 |
+| 条已隐藏仍可被读屏念出 / Tab 落入 | `blocked` 同时置 `inert` + `aria-hidden`（**待实现**，见 N-5） | 键盘 Tab 序列 + 无障碍树快照 |
+| 矩形相交但实际未遮挡 | 交集中心与四角 `elementFromPoint` 命中测试（**待实现**，见 N-5） | 覆盖 / 未覆盖两种 fixture 红绿对照 |
+| 进度条无语义 | `role="progressbar"` + `aria-valuenow/min/max` + `aria-valuetext`（**待实现**，见 P-8） | 无障碍树断言 |
 | 窗口变窄 / 中英切换 / 换主题 | 阶梯降级 → `blocked`；语言与主题心跳重绘 | 预览页三按钮夹具 |
 | 数据缺失 | 不渲染胶囊（禁止折算成 0） | `test_live.py` + D-2 |
 | 两个守护并存 | 锁文件抢占，失败方立即退出 | 手动并发 + 锁文件单测 |
