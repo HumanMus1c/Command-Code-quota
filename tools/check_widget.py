@@ -186,6 +186,8 @@ COLORS = """
 
 PROBE = "JSON.stringify(window.__goatProbe())"
 
+SHAPES = "JSON.stringify((window.__goatProbe().shapeChanges || []).slice(0,2))"
+
 # Replace the fixture's mock with one whose numbers move by exactly one field,
 # so a keyed/guarded renderer must rewrite only that chip.
 MOVE_ONE = """
@@ -244,13 +246,24 @@ def main() -> int:
         results.append(("colour: status dot is not transparent", not colors.get("dotClear"), str(colors.get("dot"))))
         results.append(("colour: progress fill is not transparent", not colors.get("fillClear"), str(colors.get("fill"))))
 
+        # Arm only after the board has settled: the first host answer replaces the
+        # "waiting" placeholder, which is a one-off transition and not the ghosting
+        # under test. Counting it made a correct renderer look guilty.
+        settle_deadline = time.time() + 15
+        while time.time() < settle_deadline:
+            if json.loads(harness.evaluate(PROBE) or "{}").get("host"):
+                break
+            time.sleep(0.3)
+        time.sleep(POLL_MS / 1000 + 1.0)
+        shapes_before = json.loads(harness.evaluate(SHAPES) or "[]")
         harness.evaluate(ARM)
         time.sleep(OBSERVE_SECONDS)
         seen = json.loads(harness.evaluate(READ) or "{}")
+        seen["shapes_grew"] = len(json.loads(harness.evaluate(SHAPES) or "[]")) - len(shapes_before)
         results.append((
             f"ghost: unchanged data writes nothing for {OBSERVE_SECONDS:.0f}s (>2 polls)",
-            seen.get("count", -1) == 0,
-            json.dumps({k: v for k, v in seen.items() if k != "where"}) + " " + json.dumps(seen.get("where")),
+            seen.get("count", -1) == 0 and seen.get("shapes_grew", 1) == 0,
+            json.dumps({k: v for k, v in seen.items() if k != "where"}) + " " + json.dumps(seen.get("where")) + " " + str(harness.evaluate(SHAPES))[:180],
         ))
 
         harness.evaluate(TAG)

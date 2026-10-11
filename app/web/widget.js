@@ -149,6 +149,7 @@
     resizer: null,
     mountedIn: null,
     slots: [],
+    shapeChanges: [],
     layoutWas: "full",
     // Spec A-5: each await below is checked against this generation, so a reply
     // that lands after a thread switch can never paint the previous conversation.
@@ -740,6 +741,15 @@
     const sameShape =
       previous.length === parts.length && previous.every((slot, index) => slot.key === keys[index]);
     if (!sameShape) {
+      // Bounded diagnostic: a shape change is the one case that still rewrites the
+      // whole row, so it has to name itself instead of being inferred from a
+      // MutationObserver count.
+      if (state.shapeChanges.length < 4) {
+        state.shapeChanges.push({
+          had: previous.map((slot) => slot.key).join(","),
+          now: keys.join(","),
+        });
+      }
       row.innerHTML = parts.join("");
       // Slots are taken from what the DOM actually holds, so a substrate that
       // models fewer elements than we generated (the string-level shim) keeps
@@ -1578,6 +1588,7 @@
     fingerprint: fingerprint(),
     session: state.threadId ? "known" : "none",
     statsAt: state.statsAt,
+    shapeChanges: state.shapeChanges,
   });
 
   // Scriptable surface for the injector and for tests; also the only way to

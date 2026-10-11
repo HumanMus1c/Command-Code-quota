@@ -287,6 +287,13 @@
    现场回归：quit 后 `entry.py` 进程数 **0**、`inject.lock` **已释放**（说明 `finally` 真的跑完，
    不是被杀）、`--status` 报 `gauge.reachable=False`。这条现在可作为唯一停止手段。
 
+**重影已量化归零（2026-10-12）**：`tools/check_widget.py` 在夹具页加载生产 `widget.js`、
+用 MutationObserver 数空闲窗口的 DOM 变更。结果 `count=0`（起点 19），`shapeChanges` 停在
+两条启动过渡（`waiting` → 真实胶囊）。**测量教训**：空闲窗口必须从"首帧数据落地、板面稳定"之后
+才开始计数，否则会把一次性的 `waiting` 替换算成周期性重影——我第一版就是这么误判的。
+工装因此要求：观察期内 `shapeChanges` 不得增长，且数值变化必须就地打补丁（节点全部存活）
+同时数字与条宽确实更新。
+
 ## 10. 安装与卸载的边界
 
 - `install.ps1`：探测解释器 → 建项目内 `.venv` → 装 `websocket-client`（官方 → 清华 → 阿里逐个回退，
