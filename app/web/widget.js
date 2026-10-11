@@ -799,7 +799,7 @@
     // Shedding is presentation only - a class, never a removal. Nodes stay put so
     // an unchanged rebuild can be skipped, and widening hands the countdowns and
     // bars straight back instead of waiting for the next full render.
-    for (const decoration of row.querySelectorAll(".cd, .bar")) {
+    for (const decoration of row.querySelectorAll(".cd.shed, .bar.shed")) {
       decoration.classList.remove("shed");
     }
     // Force the no-wrap state before measuring: scrollWidth is only an honest

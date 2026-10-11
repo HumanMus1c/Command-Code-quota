@@ -197,7 +197,7 @@ function findById(node, id) {
 
 function matches(node, sel) {
   if (sel.includes(",")) return sel.split(",").some((part) => matches(node, part.trim()));
-  if (sel.startsWith(".")) return node._class.has(sel.slice(1));
+  if (sel.startsWith(".")) return sel.slice(1).split(".").every((cls) => node._class.has(cls));
   const bare = /^\[([a-z-]+)\]$/.exec(sel);
   if (bare) return node.attrs[bare[1]] !== undefined || node.dataset[bare[1].slice(5)] !== undefined;
   const attr = /\[([a-z-]+)="([^"]*)"\]/.exec(sel);
