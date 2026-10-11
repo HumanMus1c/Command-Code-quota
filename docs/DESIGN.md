@@ -236,10 +236,19 @@
 4. ~~`widget.js` 把信封本身存进 `state.host`~~ —— **已修**（连同 `mount()` 里"display 不是 flex 就拒绝挂载"
    这第二个静默失效一起；后者使真机永远挂不上且零报错）。工装同步补了三条用例：信封必须读出额度、
    不可见的 composer 不算锚点、两个可见 composer 时一律不挂载。
-5. 尚未落地的条款（本轮只做了信封 / 块流 / 歧义 / 可见性 / 无假零）：**A-5 请求代次**、
-   **N-5 命中测试与 `inert`+`aria-hidden`**、**P-7 布局指纹**、**P-8 无障碍语义**、
-   **D-7 的速度类指标需读数条自采样**（宿主不报任何时长，`sessionContextBreakdown` 对当前线程报错，
-   所以 `tok/s` 与 `cr/h` 只能用 `windowLimits.*.used` 与 `tokens.output` 的时间差分，warm-up 期显示不可用）。
+5. 本轮已落地并在真机复查的条款：**A-5 请求代次**、**N-5 命中测试 + `inert`/`aria-hidden`**、
+   **P-7 布局指纹**、**P-8 无障碍语义**（真机回读：`role=progressbar` 带 `aria-valuenow/max`、
+   `aria-busy=false`、可见时 `inert=false`、指纹串含 `w847xh27|src=-+host+-`）。
+   另外新发现并修掉两个只在真机才会现形的缺陷：
+   - `WidgetInjector.attach()` 持会话锁后又经 `evaluate()` 取同一把非可重入锁 ⇒ **首次 reconcile 自死锁**
+     （守护进程每 2.5 秒 reconcile 一次，等于必然触发）；锁改为可重入。
+   - `WidgetInjector.evaluate()` 把 `awaitPromise` 写死为 `false` ⇒ 任何异步表达式只拿到 Promise 句柄
+     （表现为"返回空对象"），跨进程诊断必须直连 `CdpConnection` 并显式 await。
+6. 仍开着的口子：**命中率胶囊在真机上未出现**。同页直连测得 `sessionStats` 返回
+   `{success:true, stats:{branches,contextUsage,messages,tokens{input,output,cacheRead,cacheWrite}}}`
+   且 `session=known`，所以通道没问题；两种候选解释是当前会话的 token 计数为 0（分母为 0 ⇒ 按 D-2 正确地不出胶囊）
+   或 `stats` 拉取时机。**未定性之前不得声称命中率已跑通**，下一步用 `probe.statsAt` 区分这两者。
+   `gen`/`rate` 两个胶囊按 D-7 属意保持"仅本地服务供给"，面板保留后由 `/api/live` 推送即可复现。
 4. 任何"注入成功"的结论必须先有真机 `__goatProbe()`（`widget.js:1004`）回读 `mounted` 为真。
 5. **默认验证路径是免重启的同源夹具** `app/web/widget-preview.html`：复刻宿主 composer 的 DOM 与主题变量、
    mock `electronAPI`，加载**同一份** `app/web/widget.js`。绝不为验证而重启用户正在使用的 Command Code；
