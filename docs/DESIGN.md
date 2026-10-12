@@ -248,7 +248,9 @@
 | aux pane 原生面板 | **不能** | 宿主无原生面板容器；也正因如此面板被废弃 |
 | 免端口 `statusLine` 通道（其 CLI 路线） | **不能** | Command Code 主进程无该扩展点（§1 否证） |
 | 宿主内 RPC 需凭据 + 端口归属 + PID 谱系校验 | **不需要** | 我们走 preload 桥 `window.electronAPI`，读数条就在 renderer 内 |
-| 硬锁 `SUPPORTED_VERSIONS={'2.19.1'}` 的补丁适配器 | **不采用** | 见 N-2；改为"识别不了就不挂载" |
+| 硬锁 `SUPPORTED_VERSIONS={'2.19.1'}` 的补丁适配器 | **不采用** | 见 N-2；改为"识别不了就不挂载"。**2026-10-12 复核澄清**：这个锁只存在于已退役的 `compat/patch-loader.py`（不匹配即 `raise`，`COMPATIBILITY.md:74` 限定为"仅为 Windows 2.19.1 历史迁移"）；上游主路线**不写宿主目录**（`cli/lifecycle.py:1` "No desktop mutation"），所以它能自由更新——与版本锁无关 |
+| 宿主插件容器免掉的是"自研守护"，**不是端口** | 澄清（此前本仓库表述有误） | `COMPATIBILITY.md:18`：「插件需通过 loopback renderer 端口挂载：完整退出后带 `--remote-debugging-port=0 --remote-debugging-address=127.0.0.1` 参数启动。**普通启动不会自动打开此端口**」⇒ 上游与我们的约束同构 |
+| 上游对"日常双击"给出的官方解法 | **照抄**（= 本仓库 S1） | `README.zh-CN.md:63`「将参数加到快捷方式目标末尾，后续继续使用该快捷方式」、`ide/README.md:43`、`GITHUB_RELEASE.md:43`；且 `ide/README.md:45` 独立确认了同一条坑：「已经运行的 IDE 用新参数启动不会重配置现有进程」 |
 | 白名单数值持久化、不存正文/邮箱/凭据 | **照抄并收紧** | D-5 |
 | 面板与读数条共用一个 collector | **不采用** | 面板废弃；单一数据源减少一处失败面 |
 
