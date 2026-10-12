@@ -165,7 +165,16 @@
   `gauge-launch.cmd`（照抄上游 `ide/manage.py:37-47`：detached spawn + `CREATE_NO_WINDOW`）。
 - **L-3 单实例**：用户数据目录持 `watchdog.lock`（PID + 端口 + 启动时间）。抢不到锁的新实例**立刻退出**，
   绝不杀无关进程。两个守护并存会各自注册一次预加载脚本，表现为读数条重复或互相覆盖。
-- **L-4 判活禁止依赖 HTTP 端点**：面板废弃后 `/api/state`、`/api/quit` 不存在，改由锁文件 + 进程名判定。
+- **L-4 判活禁止依赖 HTTP 端点**：主判据是锁文件 + 端口归属 + 进程名。`/api/state` 与 `/api/quit`
+  确实存在（`--status` 的 `gauge.reachable` 就是走它），但**只能证明 HTTP 线程活着**——
+  2026-10-12 的实证：服务可达、`--status` 全绿，注入线程却早已因一次 `OSError` 死掉，用户重启宿主后看不到看板。
+  ⇒ "注入是否活着"只能看 `inject.lock` 持有者的日志里有没有后续 `attached`，不得拿 `reachable` 顶替。
+- **L-8 后台线程不得因单次传输异常终止**：`WidgetInjector.serve()` 的每一轮与 `attach()` 本身都要
+  兜住任意异常（不只是 `InjectError`），转成 `last_error` + 一条日志后继续下一轮；
+  注入线程的 `log` 必须与守护进程写同一个文件（`%LOCALAPPDATA%\GOATGauge\watchdog.log`），
+  因为 `pythonw` 没有控制台——**无控制台 + 无落盘 = 失败不可见**。
+  回归用例：`test_serve_keeps_looping_after_a_failing_cycle`、
+  `test_attach_swallows_a_transport_error_instead_of_dying`（红/绿在 `git archive` 基线副本上做过）。
 - **L-5 幂等**：同一份源码重复注入不得产生第二个节点；源码指纹变化时才清理并替换（`WIDGET_VERSION`
   `inject.py:24` 与 `widget.js` 内部版本必须同步，不一致的 payload 直接丢弃）。
 - **L-6 写用户数据目录必须原子且不越界**（当前代码**尚未**满足：`watchdog.py` 与 `install.ps1` 尚未落地，
