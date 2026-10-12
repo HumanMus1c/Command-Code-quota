@@ -104,10 +104,14 @@ def _runs(samples, key="board"):
 
 FLAP = """(() => {
   window.FLAP_ON = !window.FLAP_ON;
-  const id = 'avg';
-  window.__goatLayout(window.FLAP_ON ? 'add' : 'hide', id);
+  const ack = window.__goatUpdate({
+    version: window.__goatWidgetVersion,
+    server_time: Date.now(),
+    rates: window.FLAP_ON ? {tokens_per_sec: 40, requests_per_min: 1.5} : {},
+    projections: window.FLAP_ON ? {five_hour: {burn_per_hour: 2.5, verdict: "after_reset"}} : {},
+  });
   const row = document.getElementById('goat-gauge-widget').shadowRoot.getElementById('row');
-  return [...row.querySelectorAll('.chip[data-metric]')].map((c) => c.dataset.metric).join('+');
+  return JSON.stringify([ack, [...row.querySelectorAll('.chip[data-metric]')].map((c) => c.dataset.metric).join('+')]);
 })()"""
 
 FLAP_SEED = "'seeded'"
@@ -169,12 +173,13 @@ def main() -> int:
             evaluate(connection, FLAP_SEED)
         started = time.time()
         samples = []
+        flapped = []
         step = 0
         while time.time() - started < args.seconds:
             if args.flap and step % 4 == 0:
-                # Toggle a metric in and out: the board's membership is what changed
-                # under the reported jitter, so the trace has to move it.
-                evaluate(connection, FLAP)
+                # Toggle a metric's *data* in and out: membership is what moved the
+                # reported height, so the trace has to make a chip lapse.
+                flapped.append(evaluate(connection, FLAP))
             samples.append(json.loads(evaluate(connection, SAMPLE) or "{}"))
             step += 1
             time.sleep(args.step)
@@ -213,6 +218,8 @@ def main() -> int:
         print("\nheight sequence:")
         print(" ".join(f"{h}" for h in heights))
     print("board moves :", board_changes, " logged:", len(board_log))
+    if flapped:
+        print("pushes      :", " | ".join(str(x) for x in flapped[:4]))
     for entry in board_log[-12:]:
         print("   ", json.dumps(entry, ensure_ascii=False))
     return 0
