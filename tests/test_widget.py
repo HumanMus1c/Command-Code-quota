@@ -421,8 +421,10 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   const afterPush = widget.shadow.getElementById("row").innerHTML;
   check("push: throughput rendered", /吞吐<\/b><em>2\.5 次\/分/.test(afterPush));
   check("push: tok/s is gone from the board", !/tok\/s|生成/.test(afterPush), afterPush.slice(0, 200));
-  check("push: context needs host stats, not a pushed rate",
-    !/上下文/.test(afterPush), afterPush.slice(0, 200));
+  // The chip is always on the board now; what D-2 forbids is inventing a reading.
+  check("push: context keeps its slot and dashes without host stats",
+    /上下文<\/b><em>—/.test(afterPush) && !/上下文<\/b><em>[0-9]/.test(afterPush),
+    afterPush.slice(0, 200));
   check("push: consumption rate rendered", /消耗<\/b><em>4\.76 cr\/h/.test(afterPush));
   check("push: cache hit rendered", /命中<\/b><em>91\.2%/.test(afterPush));
   check("push: monthly ceiling turns it into a used/cap meter",
@@ -761,7 +763,10 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   check("theme: host theme switch is picked up without re-injection",
     findById(darkWorld.doc.documentElement, "goat-gauge-widget").dataset.dark === "0");
 
-  // ---- 17. a metric with no data must not be shoved to the tail ----
+  // ---- 17. a metric the user took off the board must keep its slot ----
+  // Membership is constant now (every kept metric renders, dash or not), so the
+  // only way a chip leaves the board is the user hiding it - and P-6 says such a
+  // metric must not be shoved to the tail by a commit that never saw it.
   const gapWorld = composerDoc("zh-Hans");
   const gapStore = fakeStorage();
   const gap = run({ doc: gapWorld.doc, electronAPI: { accountOverview: async () => OVERVIEW }, storage: gapStore });
@@ -771,28 +776,30 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     version: VERSION,
     server_time: Date.now(),
     monthly: { cap: 20, remaining: 7.2, reset_at: Date.now() + 18 * 86400e3 },
-    rates: { hit_rate_pct: 91.2 },          // no tokens_per_sec, no requests_per_min
+    rates: { hit_rate_pct: 91.2 },          // no requests_per_min: that one stays a dash
     projections: { five_hour: { burn_per_hour: 4.76, verdict: "before_reset" } },
   });
   await tick();
   const gapWidget = findById(gapWorld.doc.documentElement, "goat-gauge-widget");
   // The stub only understands simple selectors, so filter in JS.
   const rendered = [...gapWidget.shadowRoot.getElementById("row").querySelectorAll(".chip")]
-    .map((c) => c.attrs["data-metric"]).filter(Boolean);
-  check("commit: only rendered metrics are on the board",
-    rendered.indexOf("ctx") === -1 && rendered.includes("cache"), rendered.join(","));
+    .map((c) => c.attrs["data-metric"]).filter((id) => id && id !== "waiting");
+  check("board: every kept metric is present, dash or not",
+    rendered.length === 11 && rendered.includes("ctx") && rendered.includes("rate"),
+    rendered.join(","));
+
+  gap.win.window.__goatLayout("hide", "avg");
   gap.win.window.__goatLayout("edit");
-  // Reorder the rendered chips and commit exactly what is on screen; the two
-  // metrics with no data right now must keep their original slots.
-  gap.win.window.__goatLayout("commit", ["cache", "five", "week", "month", "burn", "requests", "tokens", "cost", "avg"]);
+  await tick();
+  const onBoard = [...gapWidget.shadowRoot.getElementById("row").querySelectorAll(".chip")]
+    .map((c) => c.attrs["data-metric"]).filter((id) => id && id !== "avg");
+  gap.win.window.__goatLayout("commit", onBoard);
   await tick();
   const afterCommit = gap.win.window.__goatLayout().order;
-  check("commit: absent metrics keep their configured position",
-    afterCommit.indexOf("gen") < afterCommit.indexOf("requests") &&
-      afterCommit.indexOf("rate") < afterCommit.indexOf("requests"),
-    afterCommit.join(","));
-  check("commit: rendered metrics took the dragged order",
-    afterCommit.indexOf("cache") < afterCommit.indexOf("five"), afterCommit.join(","));
+  check("commit: a hidden metric keeps the slot it had",
+    afterCommit.indexOf("avg") === 10 && afterCommit.length === 11, afterCommit.join(","));
+  check("commit: the metrics on screen took the committed order",
+    afterCommit.slice(0, 10).join(",") === onBoard.join(","), afterCommit.join(","));
 
   // ---- host contract: the bridge answers an envelope, and only a visible,
   // unambiguous composer is an anchor (both were proven against the live host) ----
@@ -856,8 +863,9 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   const zeroHtml = zeroWidget.shadow.getElementById("row").innerHTML;
   check("null: no fake 0.0% painted for an absent measurement",
     !/0\.0%/.test(zeroHtml), zeroHtml.slice(0, 80));
-  check("null: the absent cache chip is really gone",
-    !zeroHtml.includes('data-metric="cache"'), zeroHtml.slice(0, 80));
+  check("null: an absent measurement keeps its slot and shows a dash",
+    zeroHtml.includes('data-metric="cache"') && /命中<\/b><em>—/.test(zeroHtml),
+    zeroHtml.slice(0, 80));
 
   // ---- occlusion: hiding takes a real pointer hit, and hiding means inert ----
   const covered = composerDoc();

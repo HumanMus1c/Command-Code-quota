@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "15";
+  const VERSION = "16";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -189,15 +189,11 @@
   ];
   const DEFAULT_ORDER = METRICS.map((metric) => metric.id);
 
-  /* Metrics that have had data at least once since this build mounted. Membership
-   * only ever grows, so a lapping threshold cannot move the board's geometry. */
-  const seen = new Set();
-
   function placeholderHtml(id) {
     const metric = METRICS.filter((item) => item.id === id)[0];
-    // An em dash, not a zero: D-2 forbids inventing a reading, and the dash is
-    // language-neutral. "idle" rather than "muted" so the editor still offers the
-    // hide control - a placeholder is a real metric the user may want gone.
+    // An em dash, not a zero: D-2 forbids inventing a reading. "idle" rather than
+    // "muted" so the editor still offers the hide control - a placeholder is a real
+    // metric the user may want gone.
     return chip(id, metric ? metric.label() : id, "—", "idle");
   }
 
@@ -831,31 +827,27 @@
     };
     const L = locale();
     const parts = [];
-
-    for (const id of layout.order) {
-      if (layout.hidden.indexOf(id) >= 0) {
-        continue;
-      }
-      const markup = metricHtml(id, host, pushed, L);
-      if (markup) {
-        seen.add(id);
-        parts.push(markup);
-      } else if (seen.has(id)) {
-        // Membership is monotone for the life of this build. A derived metric that
-        // lapses (a sample window sliding below its threshold) used to leave the
-        // board entirely, and one chip is 60-90px: crossing the wrap point moved
-        // the whole readout between 28px and 49px, which is the flicker that was
-        // reported - and in the editor it pushed the action row out of view.
-        parts.push(placeholderHtml(id));
-      }
-    }
-
     const fresh = freshness();
-    parts.push(...toolsHtml(fresh));
 
     if (!host && !state.pushed) {
-      parts.unshift(`<span class="chip muted" data-metric="waiting"><em>${L.waiting}</em></span>`);
+      // Before the first answer there is nothing to show but the waiting state -
+      // the full board arrives with initialization, not as a wall of dashes.
+      parts.push(`<span class="chip muted" data-metric="waiting"><em>${L.waiting}</em></span>`);
+    } else {
+      for (const id of layout.order) {
+        if (layout.hidden.indexOf(id) >= 0) {
+          continue;
+        }
+        // The board's membership is constant: every metric the user keeps is always
+        // there, and one that has no reading right now shows an em dash. A chip
+        // arriving or leaving is 60-90px of re-flow, which is what made the readout
+        // jump between 28px and 49px while the user was typing, and in the editor it
+        // pushed 取消 / 保存 / 添加 out of view. An em dash is not a zero (D-2).
+        parts.push(metricHtml(id, host, pushed, L) || placeholderHtml(id));
+      }
     }
+
+    parts.push(...toolsHtml(fresh));
 
     const root = node.shadowRoot;
     const row = root.getElementById("row");
