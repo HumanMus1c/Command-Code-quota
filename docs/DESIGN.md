@@ -13,14 +13,16 @@
 
 | 项 | 结论 | 依据 |
 | --- | --- | --- |
-| 包名 / 版本 | `@commandcode/desktop` 0.1.51，Electron 43.3.0 / Chrome 150 | `resources/app/package.json` \[实测\] |
+| 包名 / 版本 | `@commandcode/desktop` 0.1.52，Electron 43.3.0 / Chrome 150 | `resources/app/package.json` \[实测 2026-10-12\] |
+| 自动更新 | `package.json` 带 `updateFeed`；`resources/app/**` 全部文件时间戳 = **2026-10-12 03:35**（本次排查当天），宿主号从 0.1.51 变 0.1.52 | \[实测\] ⇒ 任何写进安装目录的补丁**活不过一次更新**，除非按上游那样硬锁版本号 |
 | 安装位置 | `D:\Program Files\Command Code\`，`resources/app` 为**未打包目录** | \[实测\] |
 | 目录权限 | `out/renderer/index.html` 的 ACL 为 `BUILTIN\Users:(I)(RX)`；当前会话不在管理员组 | `icacls` \[实测\] |
 | 单实例 | `app.on("second-instance", …)`（`out/main/index.js:32271`）⇒ 旧实例不退，带参数再启动只会聚焦旧窗口 | \[实测\] |
 | 调试端口 | 主进程无 `app.commandLine.appendSwitch`（全文零命中）⇒ 宿主既不自开也不禁用 CDP | \[实测\] |
 | 页面 CSP | `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-zrvkeKAHvjk8g+o0GV59i098Rz4hc1p5vZJqJBHNJBU='; style-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'` | `out/renderer/index.html` \[实测\] |
 | Trusted Types | CSP **不含** `require-trusted-types-for` ⇒ 宿主未强制 Trusted Types | \[实测\] |
-| 官方扩展面 | `~/.commandcode/mcp.json`（MCP，即 Model Context Protocol 模型上下文协议）与 CLI `config.json`（实测顶层键仅 `featureModels/reasoningEffort/starredModels`）；**无** `contributes`、无 `out/cli.js`、`statusline` 命中全是 agent 输出解析与 Discord 文案 | \[实测\] |
+| 官方扩展面 | **有，但都不是渲染层容器**：① `~/.commandcode/mcp.json` 与 `~/.commandcode/.mcp.json`（另有 project 作用域），键形如 `mcpServers.{名字}:{name, transport, command, args, url, env, enabled}`，`transport:"stdio"` 必须有 `command`、否则用 `url`，`enabled !== false` 即默认启用，宿主用 `{...process.env, ...entry.env}` 起子进程；② `~/.commandcode/skills`（`initialSkills`/`skillsCatalogCache`，提示词层）；③ `settings.json` / `settings.local.json` / `AGENTS.md`；④ CLI `config.json` 实测顶层仅 `featureModels/reasoningEffort/starredModels` | `out/main/index.js` 的 `isEnabledEntry`/`inferredTransport`/`spawn` 调用点 \[实测静态\] |
+| **否证的扩展点** | `contributes`=0、`extensionsDir`=0、`loadExtension`=0 ⇒ 无 VS Code 式扩展宿主；`statusLine` 的 5 处命中是宿主解析 `status:` 文本的**局部变量**（`/^status:\s*(\S+)[ \t]*$/m`），不是配置驱动的状态栏；`hooks` 命中是 husky 与 React hooks；`insertCSS`/`customCss`/`userCss`/`executeJavaScript` 全 0 ⇒ **宿主没有"用用户文件注入界面样式或脚本"的官方通道** | \[实测静态\] |
 | 数据桥 | `window.electronAPI`：`accountOverview(options)` / `sessionStats(sessionId)` / `sessionContextBreakdown(sessionId)` / `getAppState()`，通道名 `account-overview`/`session-stats`/`session-context-breakdown` | `out/preload/index.js`、`out/main/index.js` \[静态\]，方法均可调用 \[实测\] |
 | **接口信封** | 每次调用返回的是信封而不是裸对象：`accountOverview → {success, overview}`、`getAppState → {success, state}`、`sessionStats → {success, stats}`、失败为 `{success:false, error:string}`。**不剥壳就恒得 undefined** | `--probe` 真机回读 \[实测\] |
 | `overview` 字段 | `user{id,name,email,userName,org?}` · `identity{kind,name,login,image}` · `credits{monthlyCredits,purchasedCredits,freeCredits,belowThreshold,creditThreshold,availableCredits?}` · `subscription{planId,status,currentPeriodStart,currentPeriodEnd}` · `usage{totalCount,completedCount,failedCount,totalTokens,totalTokensIn,totalTokensOut,totalCredits,totalCost,averageCost,successRate,models[]}` · `windowLimits{limited,exceeded,fiveHour{used,cap,exceeded,resetAt:number(ms)},weekly{同}}` | \[实测\] |
@@ -242,7 +244,7 @@
 | --- | --- | --- |
 | `setMarkup()` 手写 createElement 模板编译器，拒 `on*`/`src`/`href`/`srcdoc` | **不照抄机制，照抄约束** | 上游宿主强制 Trusted Types；Command Code CSP 无 `require-trusted-types-for`（§1）。我们用 `innerHTML` 拼串，但必须守住 D-3 的值类型白名单并加回归测试 |
 | 只认稳定 ID + 语义控件识别输入区 | **照抄** | 同一理由：宿主双语、类名比文案稳（A-1） |
-| 生命周期外包给宿主插件容器 / 扩展宿主 | **不能** | Command Code 无 `contributes`、无 `out/cli.js`、无 sidecar 托管 ⇒ 只能 L-1 自持守护 |
+| 生命周期外包给宿主插件容器 / 扩展宿主 | **部分照抄**（2026-10-12 复核）：`mcp.json` 的 `transport:"stdio"` 条目就是宿主托管的 sidecar，可替代我们的 HKCU Run 键 + 自研守护；但 `contributes`/扩展宿主确实没有，且**MCP 子进程拿不到渲染层** ⇒ 读数条 UI 仍走 CDP | 服务侧可外包，界面侧不可；见 `docs/MCP-SIDECAR.md` |
 | aux pane 原生面板 | **不能** | 宿主无原生面板容器；也正因如此面板被废弃 |
 | 免端口 `statusLine` 通道（其 CLI 路线） | **不能** | Command Code 主进程无该扩展点（§1 否证） |
 | 宿主内 RPC 需凭据 + 端口归属 + PID 谱系校验 | **不需要** | 我们走 preload 桥 `window.electronAPI`，读数条就在 renderer 内 |
