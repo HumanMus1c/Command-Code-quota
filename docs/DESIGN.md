@@ -136,6 +136,15 @@
   `gauge.mode` 与 `inject_mode`，不必再靠时间戳猜。注入锁记录持有者的模式，
   **演示实例不得取代真实实例的锁**（真实实例死后也一样）。未标 `mode` 的 payload
   在指纹里记成 `push:unknown`，不得默认当作真实数据。
+- **D-12 速度类指标只允许来自"会动的计数器"**：`gen`（tok/s）已于 2026-10-12 从板面**删除**，改由
+  `ctx`（上下文占用 `sessionStats.contextUsage{current,limit}`）顶替。依据是真机两张连续截图：
+  用户新开会话产生了真实消耗（`5h 0→0.25`、`Week 2.84→3.09`、`Burn 0.00→0.79 cr/h`），
+  但 `Reqs 857` 与 `Tok 367.57M` **一动不动** ⇒ `usage.totalCount` / `usage.totalTokensOut` 是
+  带缓存的账期聚合值，对它们做差分永远得不到速率（`derivedRates()` 逻辑正确，原料是死的）。
+  同一条判据适用于服务侧：`/api/live` 的 `rates.basis="none"`（窗口内 0 条 usage_records）时
+  `requests_per_min`/`tokens_per_sec` 必为 `null` ⇒ 这类胶囊按 D-2 缺席，不得显示 0。
+  `ctx` 与其余计量胶囊同形态（数值 + `role=progressbar`），数值走 `compact()`，
+  且**不带倒计时装饰**（上下文窗口没有重置时刻）。
 - **D-8 诊断自述按账号隔离且不猜测**：`probe.json` 一类自述写入
   `%LOCALAPPDATA%\GOATGauge\<accountHash>\`，哈希 = `sha256(userId)` 前 12 位。哈希隔离
   **不等于匿名化**（同哈希可跨文件关联，不许在 README 里写成隐私声明）；确认不了当前账号时**不猜、不写、
@@ -292,7 +301,8 @@
    `{success:true, stats:{branches,contextUsage,messages,tokens{input,output,cacheRead,cacheWrite}}}`
    且 `session=known`，所以通道没问题；两种候选解释是当前会话的 token 计数为 0（分母为 0 ⇒ 按 D-2 正确地不出胶囊）
    或 `stats` 拉取时机。**未定性之前不得声称命中率已跑通**，下一步用 `probe.statsAt` 区分这两者。
-   `gen`/`rate` 两个胶囊按 D-7 属意保持"仅本地服务供给"，面板保留后由 `/api/live` 推送即可复现。
+   ~~`gen`/`rate` 两个胶囊按 D-7 属意保持"仅本地服务供给"~~ —— **已被 D-12 取代**：`gen` 删除，
+   `rate` 仍属服务供给，但服务的窗口里没有 usage_records 时它按 D-2 正确缺席（实测 `basis:"none"`）。
 4. 任何"注入成功"的结论必须先有真机 `__goatProbe()`（`widget.js:1004`）回读 `mounted` 为真。
 5. **默认验证路径是免重启的同源夹具** `app/web/widget-preview.html`：复刻宿主 composer 的 DOM 与主题变量、
    mock `electronAPI`，加载**同一份** `app/web/widget.js`。绝不为验证而重启用户正在使用的 Command Code；
@@ -334,7 +344,9 @@
     属本机 CC Switch 存在真实 key 的既有基线，非回归。
 - **仍未做**：上一轮那个 `child:3`（指标在场与否随数据抖动导致整行全量重写）**本轮窗口内未复现，但没有被针对性修改**，
   不能记为已消除；真机窄列降级也**未实测**（要动用户正在用的 composer 宽度），该形态只由夹具证明。
-  待办顺序保持：① 槽位成员与数据可得性解耦；② `tok/s` 换成上下文占用；③ 面板对齐。
+  待办进度：① 成员与数据可得性解耦 **已完成**（`43ae9b2` 会话内只增不减 + `—` 占位）；
+  ② `tok/s` 换成上下文占用 **已完成**（D-12，`ctx` 胶囊，真机工装 11/11 断言其来自 `sessionStats`）；
+  ③ 面板对齐 仍未开始。
 
 **登录自启动此前从未生效（2026-10-12，`d515db5`）**
 `install.ps1` 写进 HKCU Run 键的是 `entry.py --watch`，而 `entry.py` 把这个名字**原样转发**给守护进程；

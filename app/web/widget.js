@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "14";
+  const VERSION = "15";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -28,7 +28,7 @@
       tokens: "TOKEN",
       cost: "费用",
       average: "均价",
-      generation: "生成",
+      context: "上下文",
       consumption: "消耗",
       cacheHit: "命中",
       throughput: "吞吐",
@@ -58,7 +58,7 @@
       tokens: "Tok",
       cost: "Cost",
       average: "Avg",
-      generation: "Gen",
+      context: "Ctx",
       consumption: "Burn",
       cacheHit: "Cache",
       throughput: "Rate",
@@ -178,7 +178,7 @@
     { id: "five", label: () => "5h", meter: true },
     { id: "week", label: () => locale().week, meter: true },
     { id: "month", label: () => locale().month, meter: true },
-    { id: "gen", label: () => locale().generation },
+    { id: "ctx", label: () => locale().context },
     { id: "burn", label: () => locale().consumption },
     { id: "cache", label: () => locale().cacheHit },
     { id: "rate", label: () => locale().throughput },
@@ -619,8 +619,27 @@
           `<span class="cd">${countdown(reset)}</span>${chrome("month")}</span>`
         );
       }
-      case "gen":
-        return isFinite(rates.tokens_per_sec) ? chip("gen", L.generation, `${rates.tokens_per_sec.toFixed(0)} tok/s`) : "";
+      case "ctx": {
+        // The per-thread context window is live. The account-level token counters
+        // are not - they are cached period aggregates, which is why throughput in
+        // tok/s could never yield a difference and was replaced by this (D-12).
+        const usage = (state.stats && state.stats.contextUsage) || {};
+        const current = number(usage.current);
+        const limit = number(usage.limit);
+        if (!isFinite(current) || !isFinite(limit) || limit <= 0) {
+          return "";
+        }
+        const share = current / limit;
+        const tone = share >= 0.95 ? "danger" : share >= 0.85 ? "warn" : "";
+        // Same shape as every other meter; the numbers go through compact() because
+        // a token window is five or six digits and trim() would print them raw.
+        return `<span class="chip meter${tone ? " " + tone : ""}" data-metric="ctx">` +
+          `<b>${L.context}</b><em>${compact(current)}/${compact(limit)}</em>` +
+          bar(share, tone, L.context, current, limit) +
+          // No countdown: a context window has no reset moment, and an empty .cd
+          // would be a shed target with nothing to shed.
+          chrome("ctx") + "</span>";
+      }
       case "burn":
         return isFinite(burn.burn_per_hour)
           ? chip("burn", L.consumption, `${burn.burn_per_hour.toFixed(2)} cr/h`,

@@ -186,6 +186,22 @@ COLORS = """
 })()
 """
 
+CTX = """
+(() => {
+  const row = document.getElementById('goat-gauge-widget').shadowRoot.getElementById('row');
+  const chip = row.querySelector('[data-metric=ctx]');
+  if (!chip) return JSON.stringify({present: false});
+  const bar = chip.querySelector('[role=progressbar]');
+  return JSON.stringify({
+    present: true,
+    label: (chip.querySelector('b') || {}).textContent,
+    value: (chip.querySelector('em') || {}).textContent,
+    now: bar ? bar.getAttribute('aria-valuenow') : null,
+    max: bar ? bar.getAttribute('aria-valuemax') : null,
+  });
+})()
+"""
+
 PROBE = "JSON.stringify(window.__goatProbe())"
 
 SHAPES = "JSON.stringify((window.__goatProbe().shapeChanges || []).slice(0,2))"
@@ -313,6 +329,19 @@ def main() -> int:
                 break
             time.sleep(0.3)
         time.sleep(POLL_MS / 1000 + 1.0)
+        # The context chip replaces tok/s: it is the only "speed-like" reading the
+        # host actually serves live, so this also proves the D2 pull path reaches
+        # sessionStats.contextUsage rather than a cached account aggregate.
+        context = json.loads(harness.evaluate(CTX) or "{}")
+        results.append((
+            "context: the meter is pulled from host sessionStats, not pushed",
+            context.get("present") is True
+            and context.get("value") == "92.0K/256.0K"
+            and context.get("now") == "92000"
+            and context.get("max") == "256000",
+            json.dumps(context, ensure_ascii=False),
+        ))
+
         shapes_before = json.loads(harness.evaluate(SHAPES) or "[]")
         harness.evaluate(ARM)
         time.sleep(OBSERVE_SECONDS)
@@ -383,7 +412,7 @@ def main() -> int:
         lapsed = json.loads(harness.evaluate(GEOMETRY) or "{}")
         results.append((
             "lapse: a metric that ran out of data keeps its slot and the height",
-            "gen" in str(with_data.get("board"))
+            "rate" in str(with_data.get("board"))
             and with_data.get("board") == lapsed.get("board")
             and with_data.get("height") == lapsed.get("height")
             and lapsed.get("idle", 0) >= 1,

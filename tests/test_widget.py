@@ -302,9 +302,9 @@ function run(env) {
     MutationObserver: FakeObserver,
     ResizeObserver: FakeResizeObserver,
     console,
-    setInterval: (fn, ms) => { timers.push(["interval", fn, ms]); return timers.length; },
+    setInterval: (fn, ms) => { timers.push(["interval", fn, ms, false]); return timers.length; },
     clearInterval: () => {},
-    setTimeout: (fn, ms) => { timers.push(["timeout", fn, ms]); return timers.length; },
+    setTimeout: (fn, ms) => { timers.push(["timeout", fn, ms, false]); return timers.length; },
     clearTimeout: () => {},
     getComputedStyle: (element) => ({
       display: (element && element._display) || "flex",
@@ -338,9 +338,9 @@ function run(env) {
   vm.createContext(context);
   vm.runInContext(source, context, { filename: "widget.js" });
   const fire = async (kind) => {
-    const entry = timers.find((t) => t[0] === kind && !t[2]);
+    const entry = timers.find((t) => t[0] === kind && !t[3]);
     if (!entry) return false;
-    entry[2] = true;
+    entry[3] = true;
     await entry[1]();
     return true;
   };
@@ -350,6 +350,18 @@ function run(env) {
   };
   return { win, timers, fire, fireHeartbeat };
 }
+
+// The context chip is pulled from sessionStats, so a world that counts every metric
+// has to answer the whole bridge - accountOverview alone no longer covers all eleven.
+const BRIDGE = (extra) => Object.assign({
+  accountOverview: async () => OVERVIEW,
+  getAppState: async () => ({ success: true, state: { activeThreadId: "t1" } }),
+  sessionStats: async () => ({
+    success: true,
+    stats: { branches: 2, messages: 6, contextUsage: { current: 92000, limit: 256000 },
+             tokens: { input: 1000, output: 200, cacheRead: 400, cacheWrite: 10 } },
+  }),
+}, extra || {});
 
 const results = [];
 function check(name, condition, detail) {
@@ -408,7 +420,9 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   check("push: acknowledged", Boolean(pushed && pushed.ok === true), JSON.stringify(pushed));
   const afterPush = widget.shadow.getElementById("row").innerHTML;
   check("push: throughput rendered", /吞吐<\/b><em>2\.5 次\/分/.test(afterPush));
-  check("push: generation speed rendered", /生成<\/b><em>62 tok\/s/.test(afterPush));
+  check("push: tok/s is gone from the board", !/tok\/s|生成/.test(afterPush), afterPush.slice(0, 200));
+  check("push: context needs host stats, not a pushed rate",
+    !/上下文/.test(afterPush), afterPush.slice(0, 200));
   check("push: consumption rate rendered", /消耗<\/b><em>4\.76 cr\/h/.test(afterPush));
   check("push: cache hit rendered", /命中<\/b><em>91\.2%/.test(afterPush));
   check("push: monthly ceiling turns it into a used/cap meter",
@@ -446,7 +460,11 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
 
   // ---- 8. the four width tiers, driven only by clientWidth ----
   const midWorld = composerDoc();
-  const mid = run({ doc: midWorld.doc, electronAPI: { accountOverview: async () => OVERVIEW } });
+  const mid = run({ doc: midWorld.doc, electronAPI: BRIDGE() });
+    await mid.fire("timeout");
+  await tick();
+  // The first cycle only adopts the thread id - sessionStats is fetched on the next,
+  // and the context chip needs those stats.
   await mid.fire("timeout");
   await tick();
   mid.win.window.__goatUpdate({
@@ -480,7 +498,7 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   check("tier: 400px wraps onto a second line", midWidget.dataset.layout === "wrapped",
     midWidget.dataset.layout);
   check("tier: wrapping drops no metric and no decoration",
-    metricCount() === baseline && decorations() === 6,
+    metricCount() === baseline && decorations() === 7,
     `metrics=${metricCount()} deco=${decorations()}`);
 
   midRow.clientWidth = 180;
@@ -496,19 +514,25 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     /5h<\/b><em>0\.22\/3/.test(tallHtml) && /月<\/b><em>12\.8\/20/.test(tallHtml),
     tallHtml.slice(0, 140));
 
-  midRow.clientWidth = 800;
+  // Wide enough for eleven chips *and* the 12px of slack the tier needs to climb
+  // back to one line - the context meter made 800px a wrapping width.
+  midRow.clientWidth = 900;
   const resizer = resizeObservers.find((o) => o.targets.includes(midWidget));
   check("refit: widget registered a ResizeObserver", Boolean(resizer));
   resizer.fire();
   await tick();
   await tick();
   check("refit: widening returns to one line with every metric",
-    midWidget.dataset.layout === "full" && metricCount() === baseline && decorations() === 6,
+    midWidget.dataset.layout === "full" && metricCount() === baseline && decorations() === 7,
     `layout=${midWidget.dataset.layout} metrics=${metricCount()} deco=${decorations()}`);
 
   // ---- 8c. the editor and the board must agree at a narrow width ----
   const agreeWorld = composerDoc("zh-Hans");
-  const agree = run({ doc: agreeWorld.doc, electronAPI: { accountOverview: async () => OVERVIEW } });
+  const agree = run({ doc: agreeWorld.doc, electronAPI: BRIDGE() });
+    await agree.fire("timeout");
+  await tick();
+  // The first cycle only adopts the thread id - sessionStats is fetched on the next,
+  // and the context chip needs those stats.
   await agree.fire("timeout");
   await tick();
   const agreeWidget = findById(agreeWorld.doc.documentElement, "goat-gauge-widget");
@@ -626,7 +650,9 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   // ---- 15. layout editor ----
   const edWorld = composerDoc("zh-Hans");
   const edStore = fakeStorage();
-  const ed = run({ doc: edWorld.doc, electronAPI: { accountOverview: async () => OVERVIEW }, storage: edStore });
+  const ed = run({ doc: edWorld.doc, electronAPI: BRIDGE(), storage: edStore });
+  await ed.fire("timeout");
+  await tick();
   await ed.fire("timeout");
   await tick();
   const edW = findById(edWorld.doc.documentElement, "goat-gauge-widget");
@@ -671,11 +697,11 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   await tick();
   check("add: metric comes back from the picker", labels().includes("命中"), labels());
 
-  ed.win.window.__goatLayout("move", { from: "gen", to: "five", before: true });
+  ed.win.window.__goatLayout("move", { from: "ctx", to: "five", before: true });
   await tick();
   const moved = ed.win.window.__goatLayout().order;
   check("move: drag reorder changes the sequence",
-    moved.indexOf("gen") < moved.indexOf("week"), moved.join(","));
+    moved.indexOf("ctx") < moved.indexOf("week"), moved.join(","));
 
   ed.win.window.__goatLayout("hide", "tokens");
   ed.win.window.__goatLayout("cancel");
@@ -754,7 +780,7 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   const rendered = [...gapWidget.shadowRoot.getElementById("row").querySelectorAll(".chip")]
     .map((c) => c.attrs["data-metric"]).filter(Boolean);
   check("commit: only rendered metrics are on the board",
-    rendered.indexOf("gen") === -1 && rendered.includes("cache"), rendered.join(","));
+    rendered.indexOf("ctx") === -1 && rendered.includes("cache"), rendered.join(","));
   gap.win.window.__goatLayout("edit");
   // Reorder the rendered chips and commit exactly what is on screen; the two
   // metrics with no data right now must keep their original slots.
