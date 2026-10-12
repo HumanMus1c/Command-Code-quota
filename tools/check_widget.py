@@ -92,6 +92,15 @@ def page_target(port: int) -> dict:
     raise RuntimeError("no loopback page target")
 
 
+def structural(record: dict) -> int:
+    """Writes that can move or rebuild the board.
+
+    The status dot's title/aria-label carries the data age and changes between polls
+    by design, so it is bucketed separately instead of being counted as churn.
+    """
+    return sum(int(record.get(key, 0) or 0) for key in ("text", "style", "child", "attr"))
+
+
 class Harness:
     def __init__(self, connection: CdpConnection) -> None:
         self.connection = connection
@@ -118,7 +127,7 @@ ARM = """
   const node = document.getElementById('goat-gauge-widget');
   if (!node) return 'not-mounted';
   const row = node.shadowRoot.getElementById('row');
-  window.__seen = {count: 0, text: 0, style: 0, child: 0, attr: 0, where: []};
+  window.__seen = {count: 0, text: 0, style: 0, child: 0, attr: 0, age: 0, where: []};
   window.__obs && window.__obs.disconnect();
   window.__obs = new MutationObserver((records) => {
     for (const record of records) {
@@ -126,7 +135,11 @@ ARM = """
       if (record.type === 'characterData') window.__seen.text++;
       else if (record.attributeName === 'style') window.__seen.style++;
       else if (record.type === 'childList') window.__seen.child++;
-      else window.__seen.attr++;
+      else if (record.attributeName === 'title' || record.attributeName === 'aria-label') {
+        // The status dot's tooltip carries the data age, so it moves between polls by
+        // design (P-5). Counting it as churn would bury the writes that matter.
+        window.__seen.age++;
+      } else window.__seen.attr++;
       if (record.type === 'childList' && window.__seen.where.length < 6) {
         const at = record.target;
         window.__seen.where.push(`child:${at.nodeName}.${at.className || ''}`);
@@ -349,7 +362,7 @@ def main() -> int:
         seen["shapes_grew"] = len(json.loads(harness.evaluate(SHAPES) or "[]")) - len(shapes_before)
         results.append((
             f"ghost: unchanged data writes nothing for {OBSERVE_SECONDS:.0f}s (>2 polls)",
-            seen.get("count", -1) == 0 and seen.get("shapes_grew", 1) == 0,
+            structural(seen) == 0 and seen.get("shapes_grew", 1) == 0,
             json.dumps({k: v for k, v in seen.items() if k != "where"}) + " " + json.dumps(seen.get("where")) + " " + str(harness.evaluate(SHAPES))[:180],
         ))
 
@@ -373,7 +386,7 @@ def main() -> int:
         still = json.loads(harness.evaluate(SHED) or "{}")
         results.append((
             f"ghost: a settled shed board writes nothing for {OBSERVE_SECONDS:.0f}s",
-            tight.get("count", -1) == 0 and still.get("moves") == shed.get("moves"),
+            structural(tight) == 0 and still.get("moves") == shed.get("moves"),
             json.dumps({k: v for k, v in tight.items() if k != "where"})
             + " " + json.dumps(tight.get("where")) + " " + json.dumps(still),
         ))
