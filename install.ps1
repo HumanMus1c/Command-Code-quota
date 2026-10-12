@@ -12,8 +12,12 @@ GOAT Gauge 安装器（一键）
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly      # 只体检，不写任何东西
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoAutostart    # 不注册开机自启
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -IndexUrl <url> # 指定镜像源
+  powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithShortcut   # 给你自己的快捷方式加调试端口参数（可选）
+  powershell -ExecutionPolicy Bypass -File .\install.ps1 -AutoLaunch     # 开机时若宿主完全没运行，带端口拉起一次（可选）
 
-本脚本不碰 Command Code 的安装目录，也不碰它的快捷方式与开始菜单项（见 docs/DESIGN.md N-2/§10）。
+边界：本脚本**永不**碰 Command Code 的安装目录，也不碰机器级的 ProgramData 快捷方式（docs/DESIGN.md N-2/§10）。
+-WithShortcut 是唯一例外，且默认关闭：它只改**你自己账户下** %APPDATA% 里那个 .lnk 的 Arguments 字段，
+写前把原值与 .lnk 字节副本存进 %LOCALAPPDATA%\GOATGauge\，uninstall.ps1 逐字还原。
 #>
 [CmdletBinding()]
 param(
@@ -21,7 +25,9 @@ param(
     [string]$IndexUrl,
     [switch]$NoAutostart,
     [switch]$CheckOnly,
-    [switch]$NoStart
+    [switch]$NoStart,
+    [switch]$WithShortcut,
+    [switch]$AutoLaunch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,7 +135,26 @@ function Test-Dependencies {
 }
 
 function Get-AutostartTarget {
-    return ('"{0}" "{1}" --watch' -f $VenvPyw, $EntryPy)
+    $line = ('"{0}" "{1}" --watch' -f $VenvPyw, $EntryPy)
+    if ($AutoLaunch) { $line += ' --auto-launch' }
+    return $line
+}
+
+function Get-WatchArguments {
+    $arguments = @("`"$EntryPy`"", '--watch')
+    if ($AutoLaunch) { $arguments += '--auto-launch' }
+    return $arguments
+}
+
+function Set-LaunchShortcut {
+    $ErrorActionPreference = 'Continue'
+    $report = & $VenvPy $EntryPy --install-shortcut 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "已给你自己的启动快捷方式加上调试端口参数（原值已备份，uninstall 可还原）。"
+    } else {
+        Write-Bad "快捷方式未改动：$($report.Trim())"
+    }
+    Write-Done ($report.Trim())
 }
 
 function Register-Autostart {
@@ -151,7 +176,7 @@ function Start-Watchdog {
         Write-Ok "守护进程已在运行（PID $($Matches[1])）。"
         return
     }
-    Start-Process -FilePath $VenvPyw -ArgumentList @("`"$EntryPy`"", '--watch') -WorkingDirectory $Repo -WindowStyle Hidden
+    Start-Process -FilePath $VenvPyw -ArgumentList (Get-WatchArguments) -WorkingDirectory $Repo -WindowStyle Hidden
     Write-Ok "守护进程已静默启动（无窗口）。"
 }
 
@@ -196,6 +221,11 @@ if (Test-Dependencies) {
 
 if (-not $NoAutostart) { Register-Autostart } else { Write-Done "按 -NoAutostart 跳过开机自启。" }
 
+if ($WithShortcut) {
+    Write-Step "给你的启动快捷方式加上调试端口（可选）"
+    Set-LaunchShortcut
+}
+
 if (-not $NoStart) { Start-Watchdog } else { Write-Done "按 -NoStart 跳过立即启动。" }
 
 Write-Step "诊断"
@@ -205,6 +235,8 @@ $ErrorActionPreference = 'Continue'
 Write-Host ""
 Write-Host "读数条只在宿主带环回调试端口运行时才能挂载。启动宿主请用:" -ForegroundColor Yellow
 Write-Host "    .\gauge-launch.cmd"
+Write-Host "想让双击原来的图标就自带端口（上游文档给用户的同款做法，只改你自己 %APPDATA% 下的 .lnk）:"
+Write-Host "    powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithShortcut" -ForegroundColor Gray
 Write-Host "已在运行的 Command Code 不会被本脚本重启（守护进程也不会替你关闭正在使用的会话）。"
 Write-Host "带端口启动后，回读宿主接口结构: .\gauge-launch.cmd 之后运行"
 Write-Host "    & `"$VenvPy`" `"$EntryPy`" --probe" -ForegroundColor Gray

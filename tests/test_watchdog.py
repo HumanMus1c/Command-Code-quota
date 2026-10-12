@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import sys
 from pathlib import Path
@@ -189,7 +190,8 @@ class FollowTests(unittest.TestCase):
         self.profile = self.dir / "profile"
         self.profile.mkdir()
 
-    def _run(self, ports: list[int | None], capture, stops_after: int = 4) -> tuple[list, FakeInjector]:
+    def _run(self, ports: list[int | None], capture, stops_after: int = 4, *,
+             auto_launch: bool = False, launcher=None) -> tuple[list, FakeInjector]:
         remaining = list(ports)
         logs: list[str] = []
         injector = FakeInjector()
@@ -212,6 +214,8 @@ class FollowTests(unittest.TestCase):
                 capture=capture,
                 clock=lambda: next(clock_values),
                 sleeper=sleeper,
+                auto_launch=auto_launch,
+                launcher=launcher,
             )
         return logs, injector
 
@@ -241,6 +245,47 @@ class FollowTests(unittest.TestCase):
         )
         self.assertIn("已有守护进程在跟随", " ".join(logs))
         self.assertEqual(watchdog.read_json(lock)["token"], "other")
+
+    def test_auto_launch_starts_an_absent_host_exactly_once(self) -> None:
+        calls: list[int] = []
+
+        def launcher() -> dict:
+            calls.append(1)
+            return {"ok": True, "state": "launched"}
+
+        logs, _injector = self._run(
+            [None, None, None, None], lambda argv: "", auto_launch=True, launcher=launcher
+        )
+        self.assertEqual(len(calls), 1, "四个循环里只许拉起一次")
+        self.assertIn("已带调试端口拉起", " ".join(logs))
+
+    def test_auto_launch_never_reopens_a_host_the_user_closed(self) -> None:
+        calls: list[int] = []
+        seen: list[int] = []
+
+        def launcher() -> dict:  # pragma: no cover - must not run
+            calls.append(1)
+            return {"ok": True}
+
+        def capture(argv):
+            # First look: the host is running without a port. Later it is gone - the
+            # user quit it, and reopening it from the background is not allowed.
+            if argv[0] != "tasklist":
+                return ""
+            seen.append(1)
+            return CSV_OURS if len(seen) == 1 else ""
+
+        _logs, _injector = self._run(
+            [None, None, None, None], capture, auto_launch=True, launcher=launcher,
+        )
+        self.assertEqual(calls, [], "只在开机那一次判定里拉起；此后不再动宿主")
+        self.assertEqual(len(seen), 1, "判定只许做一次")
+
+    def test_auto_launch_is_off_by_default(self) -> None:
+        def capture(argv):  # pragma: no cover - nothing may be queried
+            raise AssertionError("未开启 auto_launch 时不得探测进程，也不得拉起宿主")
+
+        _logs, _injector = self._run([None, None, None, None], capture)
 
 
 class LaunchTests(unittest.TestCase):
@@ -402,6 +447,32 @@ class EntryCLITests(unittest.TestCase):
         forwarded = self.forwarded(["--watch"])
         with mock.patch.object(watchdog, "follow", lambda *a, **k: 0):
             self.assertEqual(watchdog.main(forwarded), 0)
+
+    def test_auto_launch_forwards_a_pair_the_watchdog_parses(self) -> None:
+        forwarded = self.forwarded(["--watch", "--auto-launch"])
+        self.assertEqual(forwarded, ["--follow", "--auto-launch"])
+        captured: dict = {}
+        with mock.patch.object(watchdog, "follow", lambda **kwargs: captured.update(kwargs) or 0):
+            self.assertEqual(watchdog.main(forwarded), 0)
+        self.assertTrue(captured.get("auto_launch"))
+
+    def test_shortcut_flags_stay_in_entry_and_report_the_result(self) -> None:
+        import entry
+        from app import launch_shortcut
+
+        for argv, function in (
+            (["--install-shortcut"], "apply"),
+            (["--uninstall-shortcut"], "restore"),
+        ):
+            with (
+                mock.patch.object(sys, "argv", ["entry.py", *argv]),
+                mock.patch.object(watchdog, "main", lambda argv=None: self.fail(f"{argv} 不该走守护进程")),
+                mock.patch.object(launch_shortcut, function, lambda **kwargs: {"ok": True, "state": "patched"}),
+                mock.patch("sys.stdout", new_callable=io.StringIO),
+            ):
+                with self.assertRaises(SystemExit) as raised:
+                    entry.main()
+            self.assertEqual(raised.exception.code, 0, function)
 
     def test_every_mode_flag_maps_to_a_parsed_flag(self) -> None:
         for argv, expected in (

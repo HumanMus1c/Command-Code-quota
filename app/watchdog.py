@@ -434,8 +434,16 @@ def follow(
     capture: Callable[[list[str]], str] = _capture,
     clock: Callable[[], float] = time.time,
     sleeper: Callable[[float], None] = time.sleep,
+    auto_launch: bool = False,
+    launcher: Callable[[], dict[str, Any]] | None = None,
 ) -> int:
-    """Attach while the host owns its port, detach the moment it does not."""
+    """Attach while the host owns its port, detach the moment it does not.
+
+    ``auto_launch`` is opt-in and gets exactly one evaluation, the first time the
+    watchdog looks at a host that owns no port. If the host is already running it
+    simply waits - otherwise quitting Command Code would make us reopen it behind the
+    user's back, which is the opposite of following the host.
+    """
     profile = profile or commandcode_profile_dir()
     lock = runtime_dir() / LOCK_NAME
     token = uuid.uuid4().hex
@@ -448,6 +456,7 @@ def follow(
     port: int | None = None
     next_check = 0.0
     next_attach = 0.0
+    decide_launch = auto_launch
     try:
         while True:
             now = clock()
@@ -459,6 +468,15 @@ def follow(
                         injector.detach_all()
                         port = None
                         log("宿主或调试端口已消失，读数条已卸载。")
+                    elif decide_launch:
+                        decide_launch = False
+                        if host_processes(capture=capture) == 0:
+                            result = (launcher or launch_host)()
+                            log(
+                                "宿主未运行，已带调试端口拉起。"
+                                if result.get("ok")
+                                else f"未能拉起宿主：{result.get('state') or result.get('reason')}"
+                            )
                     next_check = now + IDLE_INTERVAL
                 else:
                     if port not in (None, found):
@@ -538,13 +556,14 @@ def gauge_report(port: int = 18927, *, timeout: float = 2.0) -> dict[str, Any]:
     }
 
 
-def status(*, profile: Path | None = None, capture: Callable[[list[str]], str] = _capture) -> dict[str, Any]:
+def status(*, profile: Path | None = None, capture: Callable[[list[str]], str] = _capture,
+           with_shortcut: bool = False) -> dict[str, Any]:
     profile = profile or commandcode_profile_dir()
     port = devtools_port(profile)
     lock = read_json(runtime_dir() / LOCK_NAME) or {}
     inject_lock = read_json(runtime_dir() / INJECT_LOCK_NAME) or {}
     owner = host_listener(port, capture=capture)
-    return {
+    report: dict[str, Any] = {
         "host_processes": host_processes(capture=capture),
         "debug_port": port or 0,
         "port_owner_is_host": bool(owner),
@@ -554,6 +573,15 @@ def status(*, profile: Path | None = None, capture: Callable[[list[str]], str] =
         "gauge": gauge_report(),
         "widget_source": str(Path(__file__).resolve().parent / "web" / "widget.js"),
     }
+    if with_shortcut:
+        # Costs a PowerShell round trip, so it is opt-in: only the CLI asks for it.
+        from .launch_shortcut import inspect as shortcut_inspect
+
+        try:
+            report["launch_shortcut"] = shortcut_inspect()
+        except Exception as exc:  # noqa: BLE001 - a diagnostic never raises
+            report["launch_shortcut"] = {"state": f"error:{type(exc).__name__}"}
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -565,10 +593,12 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--probe", action="store_true", help="只回读宿主接口的键名与类型")
     mode.add_argument("--status", action="store_true", help="打印诊断信息")
     parser.add_argument("--exe", default=None, help="Command Code 可执行文件路径")
+    parser.add_argument("--auto-launch", action="store_true",
+                        help="宿主完全没运行时，随守护启动带端口拉起一次（不会在你手动退出后重开）")
     args = parser.parse_args(argv)
 
     if args.status:
-        print(json.dumps(status(), ensure_ascii=False, indent=2), flush=True)
+        print(json.dumps(status(with_shortcut=True), ensure_ascii=False, indent=2), flush=True)
         return 0
     if args.detach:
         result = detach()
@@ -585,7 +615,7 @@ def main(argv: list[str] | None = None) -> int:
                    "running-without-port": result.get("hint", ""), "no-host": result.get("hint", "")}
         print(message.get(str(result.get("state")), ""), flush=True)
         return 0 if result.get("ok") else 2
-    return follow()
+    return follow(auto_launch=args.auto_launch)
 
 
 if __name__ == "__main__":

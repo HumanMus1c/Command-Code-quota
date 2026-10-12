@@ -370,7 +370,24 @@
   **绝不关闭 TLS 校验**）→ 写 HKCU Run 键 → 注册读数条 → 打印状态。**幂等**，重复执行只补齐。
 - `uninstall.ps1`：删 Run 键 → 停守护 → `__goatDispose()` → 删 `.venv`。`%LOCALAPPDATA%\GOATGauge\`
   默认保留，`-Purge` 才删。不碰宿主安装目录、不碰宿主 CSP、不碰用户快捷方式。
-- 两者都**不**创建/改写 Command Code 的快捷方式或开始菜单项；带端口启动是一条独立命令，是否使用由用户决定。
+- 两者都**不**创建/改写 Command Code 的**安装目录**、**机器级（`C:\ProgramData`）快捷方式**或开始菜单项；
+  带端口启动是一条独立命令，是否使用由用户决定。
+- **S1（可选，默认关）：`install.ps1 -WithShortcut` 允许改"当前用户自己账户下"的那一个 `.lnk`。**
+  这是上游文档给所有用户的同款做法（`README.zh-CN.md:63`「将参数加到快捷方式目标末尾」）。硬约束：
+  ① 只写 `Arguments` 一个字段，且**只追加缺失的开关**（幂等，重复执行不叠加）；
+  ② 首次改动前把原值写进 `%LOCALAPPDATA%\GOATGauge\launch-shortcut.json`，并**再存一份 `.lnk` 字节副本**
+  （`launch-shortcut.lnk.bak`）——WScript 的 `Save()` 会重写整个链接文件，只靠 JSON 不足以兜底；
+  ③ `uninstall.ps1` 逐字还原并回读校验，还原成功才删备份；`-Purge` 之前必须先还原；
+  ④ `--status` 报 `launch_shortcut.state = ready|missing-args|absent|error`，让"双击有没有端口"可查。
+  失败模式必须写清：**已有无端口实例在跑时，带参数的启动只会聚焦旧窗口**（宿主 `requestSingleInstanceLock`），
+  这条与上游 `ide/README.md:45` 的说明一致。
+- **S2（可选，默认关）：`install.ps1 -AutoLaunch` 让守护在开机那一次判定里，若宿主完全没运行就带端口拉起。**
+  语义是**只判定一次**：第一眼看到宿主在跑（哪怕没端口）就永久放弃拉起，否则用户主动退出 Command Code 后
+  会被后台重新打开——那不再叫"跟随宿主"。开关随 Run 键一起注册（`entry.py --watch --auto-launch`）。
+- **仍然禁止**：IFEO（Image File Execution Options）一类启动劫持。实测宿主的 GPU/网络/渲染子进程
+  都是**同一个 exe** 带 `--type=…` 派生（`tasklist` 实据），而 IFEO 在 CreateProcess 层生效 ⇒ 它会拦下
+  每一个子进程，写错就是宿主起不来；且它不随宿主更新消失，卸载器也不知道它存在 ⇒ 启动器一旦丢失，
+  应用直接打不开。收益（覆盖绕过快捷方式的启动）与失败代价不成比例。
 - **Run 键里那条命令必须被证明"能解析"，而不是"写着对"**：`pythonw` 无控制台，argparse 报错等于静默死亡。
   公开标志名（`--watch`）与守护进程内部标志名（`--follow`）之间的翻译是一张跨文件契约，
   只能靠一条把两侧串起来的测试守住（`tests/test_watchdog.py::EntryCLITests`）。

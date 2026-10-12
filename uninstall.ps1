@@ -72,6 +72,20 @@ try {
 }
 if ($stopped) { Write-Ok "已结束 $stopped 个守护进程。" } else { Write-Done "没有在运行的守护进程。" }
 
+Write-Step "还原启动快捷方式（若安装时改过）"
+if ($hasVenv) {
+    $restored = (& $VenvPy $EntryPy --uninstall-shortcut 2>&1 | Out-String)
+    if ($LASTEXITCODE -eq 0) {
+        if ($restored -match 'nothing-to-restore') { Write-Done "没改过快捷方式，无需还原。" }
+        else { Write-Ok "已把 Arguments 还原成安装前的原值。" }
+    } else {
+        Write-Skip "还原失败，请手动检查快捷方式；原始 .lnk 副本留在数据目录里。$($restored.Trim())"
+    }
+    Write-Done ($restored.Trim())
+} else {
+    Write-Skip "没有 .venv，无法自动还原；备份仍在数据目录（launch-shortcut.json / launch-shortcut.lnk.bak）。"
+}
+
 Write-Step "注销开机自启"
 $current = (Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue).$RunValue
 if (-not $current) {
@@ -115,5 +129,6 @@ if (Test-Path -LiteralPath $data) {
 }
 
 Write-Host ""
-Write-Host "卸载完成。Command Code 本身未做任何改动；若它当前带调试端口在跑，"
-Write-Host "正常退出再重新打开即可回到默认（无端口）状态。" -ForegroundColor Yellow
+Write-Host "卸载完成。Command Code 的安装目录与机器级快捷方式从未被改动；你自己账户下的启动快捷方式"
+Write-Host "已按上面的还原步骤处理（没改过就是原样）。若它当前带调试端口在跑，正常退出再重新打开"
+Write-Host "即可回到默认（无端口）状态。" -ForegroundColor Yellow

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 
 
 def parse_args() -> argparse.Namespace:
@@ -15,6 +16,12 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--status", action="store_true", help="print host / port / watchdog diagnostics")
     mode.add_argument("--launch", action="store_true", help="start Command Code with a loopback debugging port")
     mode.add_argument("--probe", action="store_true", help="report the shape of the host bridge, values excluded")
+    mode.add_argument("--install-shortcut", action="store_true",
+                      help="add the loopback debugging arguments to your own Command Code shortcut")
+    mode.add_argument("--uninstall-shortcut", action="store_true",
+                      help="put the shortcut arguments back exactly as they were before")
+    parser.add_argument("--auto-launch", action="store_true",
+                        help="with --watch: start the host with a port once, when it is not running at all")
     parser.add_argument("--host", default="127.0.0.1", help="server host")
     parser.add_argument("--port", type=int, default=0, help="server port; 0 chooses a free port")
     parser.add_argument("--demo", action="store_true", help="show generated demo data")
@@ -44,6 +51,14 @@ def detach_widget() -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.install_shortcut or args.uninstall_shortcut:
+        from app.launch_shortcut import apply as apply_shortcut
+        from app.launch_shortcut import restore as restore_shortcut
+
+        result = apply_shortcut() if args.install_shortcut else restore_shortcut()
+        print(json.dumps(result, ensure_ascii=False), flush=True)
+        raise SystemExit(0 if result.get("ok") else 1)
+
     if args.watch or args.status or args.launch or args.probe:
         from app.watchdog import main as watchdog_main
 
@@ -51,14 +66,17 @@ def main() -> None:
         # watchdog's own loop is called --follow. Forwarding the public name here
         # made argparse reject it, so the login autostart died before the first
         # poll while every other mode flag worked.
-        chosen = "--follow"
         if args.status:
-            chosen = "--status"
+            chosen = ["--status"]
         elif args.launch:
-            chosen = "--launch"
+            chosen = ["--launch"]
         elif args.probe:
-            chosen = "--probe"
-        raise SystemExit(watchdog_main([chosen]))
+            chosen = ["--probe"]
+        else:
+            chosen = ["--follow"]
+            if args.auto_launch:
+                chosen.append("--auto-launch")
+        raise SystemExit(watchdog_main(chosen))
 
     if args.detach:
         detach_widget()
