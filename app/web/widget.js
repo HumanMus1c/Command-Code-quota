@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "13";
+  const VERSION = "14";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -188,6 +188,18 @@
     { id: "avg", label: () => locale().average },
   ];
   const DEFAULT_ORDER = METRICS.map((metric) => metric.id);
+
+  /* Metrics that have had data at least once since this build mounted. Membership
+   * only ever grows, so a lapping threshold cannot move the board's geometry. */
+  const seen = new Set();
+
+  function placeholderHtml(id) {
+    const metric = METRICS.filter((item) => item.id === id)[0];
+    // An em dash, not a zero: D-2 forbids inventing a reading, and the dash is
+    // language-neutral. "idle" rather than "muted" so the editor still offers the
+    // hide control - a placeholder is a real metric the user may want gone.
+    return chip(id, metric ? metric.label() : id, "—", "idle");
+  }
 
   function loadLayout() {
     layout.order = DEFAULT_ORDER.slice();
@@ -807,7 +819,15 @@
       }
       const markup = metricHtml(id, host, pushed, L);
       if (markup) {
+        seen.add(id);
         parts.push(markup);
+      } else if (seen.has(id)) {
+        // Membership is monotone for the life of this build. A derived metric that
+        // lapses (a sample window sliding below its threshold) used to leave the
+        // board entirely, and one chip is 60-90px: crossing the wrap point moved
+        // the whole readout between 28px and 49px, which is the flicker that was
+        // reported - and in the editor it pushed the action row out of view.
+        parts.push(placeholderHtml(id));
       }
     }
 
@@ -1142,6 +1162,7 @@
 .chip b{font-weight:600;opacity:.6;font-size:10px;letter-spacing:.02em}
 .chip em{font-style:normal;font-family:var(--goat-mono,ui-monospace,Consolas,monospace)}
 .chip.muted{opacity:.45}
+.chip.idle{opacity:.62}
 .chip.bad em{color:var(--goat-warn,#d97706)}
 .chip .cd{opacity:.62;font-size:10.5px}
 .cd.shed,.bar.shed{display:none}
