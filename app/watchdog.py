@@ -480,6 +480,11 @@ def follow(
                                 if result.get("ok")
                                 else f"未能拉起宿主：{result.get('state') or result.get('reason')}"
                             )
+                        else:
+                            # Saying nothing here is how "why is there no board" turns
+                            # into an hour of guessing: the chance is spent, on purpose.
+                            log("宿主在跑但没有调试端口；不会重启它，也不再自动拉起。"
+                                "带端口启动请用 gauge-launch.cmd 或改过参数的快捷方式。")
                     next_check = now + IDLE_INTERVAL
                 else:
                     if port not in (None, found):

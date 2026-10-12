@@ -294,6 +294,7 @@ class FollowTests(unittest.TestCase):
         )
         self.assertEqual(calls, [], "只在开机那一次判定里拉起；此后不再动宿主")
         self.assertEqual(len(seen), 1, "判定只许做一次")
+        self.assertIn("不会重启它，也不再自动拉起", " ".join(_logs), "放弃这个决定必须留痕")
 
     def test_auto_launch_is_off_by_default(self) -> None:
         def capture(argv):  # pragma: no cover - nothing may be queried
