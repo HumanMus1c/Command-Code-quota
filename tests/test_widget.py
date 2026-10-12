@@ -560,6 +560,14 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   check("consistency: editor shows exactly what the board shows at 180px",
     boardMetrics === editorMetrics && boardMetrics.split(",").length === 11,
     `board=${boardMetrics} editor=${editorMetrics}`);
+  // Exiting the editor used to leave data-layout="editing" behind, which matches no
+  // tier rule: the row fell back to nowrap + overflow hidden and clipped the tail.
+  check("exit editor: the tier attribute comes back, not left as editing",
+    ["full", "wrapped", "tall"].indexOf(agreeWidget.dataset.layout) >= 0,
+    agreeWidget.dataset.layout);
+  check("exit editor: the narrow board still shows every metric",
+    agreeRow.children.map((c) => c.attrs["data-metric"]).filter(Boolean).length === 11,
+    String(agreeRow.children.length));
 
   // ---- 9. dispose leaves nothing behind ----
   const disposed = first.win.window.__goatDispose();
@@ -713,6 +721,8 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     afterCancel.hidden.indexOf("tokens") === -1 && afterCancel.editing === false,
     JSON.stringify(afterCancel.hidden));
   check("cancel: nothing was written to storage", edStore.map.size === 0);
+  check("cancel: the row is back on a tier the stylesheet knows",
+    ["full", "wrapped", "tall"].indexOf(edW.dataset.layout) >= 0, edW.dataset.layout);
 
   ed.win.window.__goatLayout("edit");
   ed.win.window.__goatLayout("hide", "tokens");

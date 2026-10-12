@@ -219,6 +219,24 @@ PROBE = "JSON.stringify(window.__goatProbe())"
 
 SHAPES = "JSON.stringify((window.__goatProbe().shapeChanges || []).slice(0,2))"
 
+CLIP = """
+(() => {
+  const node = document.getElementById('goat-gauge-widget');
+  const row = node.shadowRoot.getElementById('row');
+  const last = row.lastElementChild;
+  const box = row.getBoundingClientRect();
+  const tail = last ? last.getBoundingClientRect() : box;
+  return JSON.stringify({
+    layout: node.dataset.layout,
+    tiers: ['full', 'wrapped', 'tall'].indexOf(node.dataset.layout) >= 0,
+    metrics: row.querySelectorAll('.chip[data-metric]').length,
+    rowRight: Math.round(box.right),
+    lastRight: Math.round(tail.right),
+    outside: Math.round(Math.max(tail.right - box.right, tail.bottom - box.bottom)),
+  });
+})()
+"""
+
 # Push derived data in, then let it lapse: the chip that leaves the board is worth
 # tens of pixels of re-flow, which is the height jitter that was reported.
 PUSH_RATE = """((on) => JSON.stringify(window.__goatUpdate({
@@ -430,6 +448,20 @@ def main() -> int:
             and with_data.get("height") == lapsed.get("height")
             and lapsed.get("idle", 0) >= 1,
             f"ack={ack_off} {json.dumps(with_data)} -> {json.dumps(lapsed)}",
+        ))
+
+        # The reported collapse: leaving the editor used to leave data-layout
+        # "editing" behind, which matches no tier rule, so the row fell back to
+        # nowrap + overflow hidden and painted the tail outside its own box.
+        harness.evaluate("window.__goatLayout('edit')")
+        time.sleep(0.5)
+        harness.evaluate("window.__goatLayout('cancel')")
+        time.sleep(1.0)
+        after_edit = json.loads(harness.evaluate(CLIP) or "{}")
+        results.append((
+            "exit editor: the row is back on a tier and paints nothing outside its box",
+            after_edit.get("tiers") is True and after_edit.get("outside", 99) <= 1,
+            json.dumps(after_edit),
         ))
 
         connection.close()

@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "16";
+  const VERSION = "17";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -979,9 +979,19 @@
    * costs the width a lower level would need, which can only be measured by
    * un-shedding first - so the *only* event allowed to re-open the decision is the
    * available width changing. A rebuilt row re-applies the level it already has. */
+  const TIER_ATTRS = ["full", "wrapped", "tall"];
+
   function fit(root, node) {
     const row = root.getElementById("row");
     let level = state.shedLevel;
+    if (TIER_ATTRS.indexOf(node.dataset.layout || "") < 0) {
+      // The attribute is not naming a tier we can produce: "editing" is left behind
+      // when the editor closes, and "blocked" when the occlusion guard last hid us.
+      // Neither matches a rule, so the row silently falls back to nowrap + overflow
+      // hidden and clips whatever does not fit - or stays invisible forever. Trusting
+      // the recorded level here is what made the board collapse to one line.
+      state.climb = true;
+    }
     // The width this tier was judged against. A resize callback reporting the same
     // width is our own height change coming back around, and re-judging for it is
     // what made the board alternate between one line and two on a stable layout.
