@@ -50,7 +50,8 @@ def start_static_server(directory: Path) -> tuple[socketserver.TCPServer, int]:
     return server, server.server_address[1]
 
 
-def launch_browser(executable: str, profile: Path) -> int:
+def launch_browser(executable: str, profile: Path, window_size: str = "") -> int:
+    extra = [f"--window-size={window_size}"] if window_size else []
     subprocess.Popen(  # noqa: S603 - fixed allow-list of browser paths below
         [
             executable,
@@ -60,6 +61,7 @@ def launch_browser(executable: str, profile: Path) -> int:
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--disable-gpu",
+            *extra,
             "about:blank",
         ],
         stdin=subprocess.DEVNULL,
