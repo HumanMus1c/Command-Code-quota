@@ -1369,7 +1369,7 @@ def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False,
     claim = None
     if inject:
         from .inject import commandcode_profile_dir, start_injection
-        from .watchdog import claim_inject_lock
+        from .watchdog import LOG_NAME, claim_inject_lock, file_logger, runtime_dir
 
         profile = commandcode_profile_dir()
         claim = claim_inject_lock(mode="demo" if demo else "live")
@@ -1381,7 +1381,10 @@ def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False,
                 flush=True,
             )
         else:
-            start_injection(service, service.stop_event)
+            # The injector runs on its own thread; without a file it is invisible,
+            # which is how a dead injection loop looked like a healthy service.
+            start_injection(service, service.stop_event,
+                            log=file_logger(runtime_dir() / LOG_NAME))
             print(
                 "读数条注入已启动；若 Command Code 未带调试端口运行则不会挂载。"
                 f"\n  宿主配置目录: {profile}",

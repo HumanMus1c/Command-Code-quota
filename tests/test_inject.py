@@ -471,6 +471,39 @@ class InjectorLifecycleTestCase(unittest.TestCase):
             thread.join(timeout=2)
         self.assertFalse(thread.is_alive())
 
+    def test_attach_swallows_a_transport_error_instead_of_dying(self) -> None:
+        # A refused or exhausted socket is an OSError, not an InjectError, and used
+        # to escape attach() onto the daemon thread - killing the injection forever
+        # while the HTTP service kept answering and --status stayed green.
+        injector = WidgetInjector(profile=Path("/unused"), payload_builder=self.payload)
+        logs: list[str] = []
+        injector.log = logs.append
+        with mock.patch.object(inject, "devtools_port", return_value=9333), mock.patch.object(
+            inject, "discover_targets", side_effect=OSError("only one usage of each socket address")
+        ):
+            injector.attach()
+        self.assertIn("OSError", injector.last_error)
+        self.assertTrue(any("reconcile 异常" in line for line in logs), logs)
+
+    def test_serve_keeps_looping_after_a_failing_cycle(self) -> None:
+        injector = WidgetInjector(profile=Path("/unused"), payload_builder=self.payload)
+        stop = threading.Event()
+        logs: list[str] = []
+        injector.log = logs.append
+        calls: list[int] = []
+
+        def attach() -> None:
+            calls.append(1)
+            if len(calls) == 1:
+                raise OSError("socket gone")
+            stop.set()
+
+        injector.attach = attach
+        injector.snapshot = lambda: None
+        injector.serve(stop, interval=0.001)
+        self.assertEqual(len(calls), 2, "第一轮异常不得终止循环")
+        self.assertTrue(any("注入循环异常" in line for line in logs), logs)
+
 
 if __name__ == "__main__":
     unittest.main()

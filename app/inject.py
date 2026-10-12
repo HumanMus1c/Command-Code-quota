@@ -264,6 +264,20 @@ class WidgetInjector:
         return {"connection": connection, "identifier": identifier, "target": target}
 
     def attach(self) -> None:
+        """Reconcile the page list, and never raise.
+
+        This runs on a daemon thread next to the HTTP service. An uncaught transport
+        error (a refused or exhausted socket, a WebSocket hiccup) used to kill it
+        silently: the service stayed reachable, --status stayed green, and the page
+        simply never got a readout again - not even after the host restarted.
+        """
+        try:
+            self._attach_once()
+        except Exception as exc:  # noqa: BLE001 - the loop outlives any one cycle
+            self.last_error = f"{type(exc).__name__}: {exc}"
+            self.log(f"注入 reconcile 异常，本轮跳过：{self.last_error}")
+
+    def _attach_once(self) -> None:
         port = devtools_port(self.profile)
         if not port:
             self.last_error = "no-debug-port"
@@ -289,9 +303,9 @@ class WidgetInjector:
                     self._sessions[page_id] = self._open(target)
                     self.log(f"attached {target.title or page_id}")
                     self.last_error = ""
-                except InjectError as exc:
-                    self.last_error = str(exc)
-                    self.log(f"attach failed for {page_id}: {exc}")
+                except Exception as exc:  # noqa: BLE001 - one bad target, not one bad loop
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self.log(f"attach failed for {page_id}: {self.last_error}")
 
     def attached(self) -> int:
         """How many pages hold a live session right now."""
@@ -379,16 +393,20 @@ class WidgetInjector:
         self._stop = stop_event
         next_attach = 0.0
         while not stop_event.is_set():
-            now = time.time()
-            if now >= next_attach:
-                self.attach()
-                next_attach = now + ATTACH_INTERVAL
-                theme = self.read_theme()
-                if theme:
-                    self.host_theme = theme
-            payload = self.snapshot()
-            if payload:
-                self.push(payload)
+            try:
+                now = time.time()
+                if now >= next_attach:
+                    self.attach()
+                    next_attach = now + ATTACH_INTERVAL
+                    theme = self.read_theme()
+                    if theme:
+                        self.host_theme = theme
+                payload = self.snapshot()
+                if payload:
+                    self.push(payload)
+            except Exception as exc:  # noqa: BLE001 - the daemon must survive the cycle
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.log(f"注入循环异常，继续运行：{self.last_error}")
             stop_event.wait(interval)
 
     def detach_all(self) -> None:
@@ -440,6 +458,7 @@ def start_injection(
     *,
     profile: Path | None = None,
     interval: float = 2.5,
+    log: Callable[[str], None] | None = None,
 ) -> WidgetInjector:
     def payload() -> dict[str, Any]:
         # The renderer's theme is the only trustworthy copy, so hand it back to
@@ -447,7 +466,7 @@ def start_injection(
         service.host_theme = injector.host_theme or getattr(service, "host_theme", "")
         return build_payload(service)
 
-    injector = WidgetInjector(profile=profile, payload_builder=payload)
+    injector = WidgetInjector(profile=profile, payload_builder=payload, log=log or (lambda message: None))
     threading.Thread(
         target=injector.serve,
         args=(stop_event,),
