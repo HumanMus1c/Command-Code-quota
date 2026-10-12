@@ -57,7 +57,7 @@ try {
     $procs = Get-CimInstance Win32_Process -Filter "Name='pythonw.exe' OR Name='python.exe'" -ErrorAction SilentlyContinue
     foreach ($proc in $procs) {
         $line = "$($proc.CommandLine)"
-        if ($line -notmatch 'entry\.py.*--watch|app\.watchdog') { continue }
+        if ($line -notmatch 'entry\.py.*(--watch|--serve)|app\.watchdog') { continue }
         $exePath = "$($proc.ExecutablePath)"
         # 只结束由本仓库 .venv 拉起的进程；命令行匹配但路径不符的一律不动。
         if (-not $exePath -or -not $exePath.StartsWith($Venv, [StringComparison]::OrdinalIgnoreCase)) {

@@ -135,13 +135,16 @@ function Test-Dependencies {
 }
 
 function Get-AutostartTarget {
-    $line = ('"{0}" "{1}" --watch' -f $VenvPyw, $EntryPy)
+    # 一个进程同时干三件事：本地服务、注入读数条、（可选）开机时带端口拉起宿主。
+    # 注册成 --watch 会让服务缺席：月份分母退成估算值、gen/rate 这类只由服务供给的
+    # 指标永远不出现 —— 这是 2026-10-12 真机上实际踩到的残缺形态。
+    $line = ('"{0}" "{1}" --serve --inject' -f $VenvPyw, $EntryPy)
     if ($AutoLaunch) { $line += ' --auto-launch' }
     return $line
 }
 
-function Get-WatchArguments {
-    $arguments = @("`"$EntryPy`"", '--watch')
+function Get-ServiceArguments {
+    $arguments = @("`"$EntryPy`"", '--serve', '--inject')
     if ($AutoLaunch) { $arguments += '--auto-launch' }
     return $arguments
 }
@@ -177,12 +180,12 @@ function Register-Autostart {
 function Start-Watchdog {
     $ErrorActionPreference = 'Continue'
     $diagnosis = & $VenvPy $EntryPy --status 2>$null | Out-String
-    if ($diagnosis -match '"watchdog_pid":\s*([1-9]\d*)') {
-        Write-Ok "守护进程已在运行（PID $($Matches[1])）。"
+    if ($diagnosis -match '"inject_pid":\s*([1-9]\d*)') {
+        Write-Ok "本地服务与注入已在运行（PID $($Matches[1])）。"
         return
     }
-    Start-Process -FilePath $VenvPyw -ArgumentList (Get-WatchArguments) -WorkingDirectory $Repo -WindowStyle Hidden
-    Write-Ok "守护进程已静默启动（无窗口）。"
+    Start-Process -FilePath $VenvPyw -ArgumentList (Get-ServiceArguments) -WorkingDirectory $Repo -WindowStyle Hidden
+    Write-Ok "本地服务与注入已静默启动（无窗口）。"
 }
 
 Write-Step "定位 Python 3.10+"

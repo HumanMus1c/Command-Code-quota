@@ -429,6 +429,41 @@ def _spawn_detached(argv: list[str]) -> Any:
     )
 
 
+def follow_startup_launch(
+    *,
+    profile: Path | None = None,
+    capture: Callable[[list[str]], str] = _capture,
+    launcher: Callable[[], dict[str, Any]] | None = None,
+    log: Callable[[str], None] = lambda message: None,
+    port_owner: bool | None = None,
+) -> bool:
+    """Bring the host up with a debugging port - once, and only if none is running.
+
+    The one-shot rule is the whole design: if a host is already up without a port we
+    give up permanently rather than reopen an app the user just closed. Both the
+    watchdog and the foreground service call this, so the decision and its wording
+    live in one place. ``port_owner`` lets a caller that already looked pass the
+    answer instead of making this probe the port twice.
+    """
+    if port_owner is None:
+        port_owner = bool(host_listener(devtools_port(profile or commandcode_profile_dir()), capture=capture))
+    if port_owner:
+        return False
+    if host_processes(capture=capture) > 0:
+        # Saying nothing here is how "why is there no board" turns into an hour of
+        # guessing: the chance is spent, on purpose.
+        log("宿主在跑但没有调试端口；不会重启它，也不再自动拉起。"
+            "带端口启动请用 gauge-launch.cmd 或改过参数的快捷方式。")
+        return False
+    result = (launcher or launch_host)()
+    log(
+        "宿主未运行，已带调试端口拉起。"
+        if result.get("ok")
+        else f"未能拉起宿主：{result.get('state') or result.get('reason')}"
+    )
+    return bool(result.get("ok"))
+
+
 def follow(
     *,
     profile: Path | None = None,
@@ -473,18 +508,8 @@ def follow(
                         log("宿主或调试端口已消失，读数条已卸载。")
                     elif decide_launch:
                         decide_launch = False
-                        if host_processes(capture=capture) == 0:
-                            result = (launcher or launch_host)()
-                            log(
-                                "宿主未运行，已带调试端口拉起。"
-                                if result.get("ok")
-                                else f"未能拉起宿主：{result.get('state') or result.get('reason')}"
-                            )
-                        else:
-                            # Saying nothing here is how "why is there no board" turns
-                            # into an hour of guessing: the chance is spent, on purpose.
-                            log("宿主在跑但没有调试端口；不会重启它，也不再自动拉起。"
-                                "带端口启动请用 gauge-launch.cmd 或改过参数的快捷方式。")
+                        follow_startup_launch(profile=profile, capture=capture,
+                                              launcher=launcher, log=log, port_owner=False)
                     next_check = now + IDLE_INTERVAL
                 else:
                     if port not in (None, found):

@@ -1355,10 +1355,17 @@ def stop_server() -> None:
         _server_thread = None
 
 
-def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False) -> None:
+def run_foreground(*, host: str, port: int, demo: bool, inject: bool = False,
+                   auto_launch: bool = False) -> None:
     service = GaugeService(demo=demo)
     bound_host, bound_port = start_server(host=host, port=port, service=service)
     service.start_background()
+    if auto_launch:
+        # One process does all three jobs: serve, inject, and - only at startup, and
+        # only when the host is not running at all - bring the host up with a port.
+        from .watchdog import LOG_NAME, file_logger, follow_startup_launch, runtime_dir
+
+        follow_startup_launch(log=file_logger(runtime_dir() / LOG_NAME))
     claim = None
     if inject:
         from .inject import commandcode_profile_dir, start_injection

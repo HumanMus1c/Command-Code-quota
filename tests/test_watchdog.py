@@ -433,6 +433,48 @@ def _connection_factory(value):
     return Connection
 
 
+class StartupLaunchTests(unittest.TestCase):
+    """The one-shot host launch, shared by --watch and --serve --inject."""
+
+    def setUp(self) -> None:
+        self.dir = Path(tempfile.mkdtemp(prefix="goat-launch-"))
+        self.environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
+    def test_a_port_already_owned_by_the_host_needs_no_decision(self) -> None:
+        def capture(argv):  # pragma: no cover - must not be reached
+            raise AssertionError("已有端口归属时不该再查进程")
+
+        logs: list[str] = []
+        self.assertFalse(watchdog.follow_startup_launch(
+            profile=self.dir, capture=capture, port_owner=True, log=logs.append))
+        self.assertEqual(logs, [])
+
+    def test_a_host_running_without_a_port_spends_the_chance_quietly_loudly(self) -> None:
+        logs: list[str] = []
+        launched: list[int] = []
+        self.assertFalse(watchdog.follow_startup_launch(
+            profile=self.dir, capture=lambda argv: CSV_OURS,
+            launcher=lambda: launched.append(1) or {"ok": True}, log=logs.append, port_owner=False))
+        self.assertEqual(launched, [])
+        self.assertIn("不会重启它，也不再自动拉起", " ".join(logs))
+
+    def test_an_absent_host_is_started_with_a_port_once(self) -> None:
+        logs: list[str] = []
+        self.assertTrue(watchdog.follow_startup_launch(
+            profile=self.dir, capture=lambda argv: "",
+            launcher=lambda: {"ok": True, "state": "launched"}, log=logs.append, port_owner=False))
+        self.assertIn("已带调试端口拉起", " ".join(logs))
+
+    def test_a_failed_launch_is_recorded_not_swallowed(self) -> None:
+        logs: list[str] = []
+        self.assertFalse(watchdog.follow_startup_launch(
+            profile=self.dir, capture=lambda argv: "",
+            launcher=lambda: {"ok": False, "state": "no-host"}, log=logs.append, port_owner=False))
+        self.assertIn("未能拉起宿主", " ".join(logs))
+
+
 class EntryCLITests(unittest.TestCase):
     """entry.py and the watchdog are two argparse surfaces that have to agree.
 
@@ -470,6 +512,17 @@ class EntryCLITests(unittest.TestCase):
         with mock.patch.object(watchdog, "follow", lambda **kwargs: captured.update(kwargs) or 0):
             self.assertEqual(watchdog.main(forwarded), 0)
         self.assertTrue(captured.get("auto_launch"))
+
+    def test_serve_inject_carries_auto_launch_and_the_probed_port(self) -> None:
+        # The autostart command is now `--serve --inject`: --watch alone leaves the
+        # local service out, which silently degrades the month denominator and drops
+        # the service-only metrics. --port must default to what --status probes.
+        import entry
+
+        with mock.patch.object(sys, "argv", ["entry.py", "--serve", "--inject", "--auto-launch"]):
+            args = entry.parse_args()
+        self.assertTrue(args.serve and args.inject and args.auto_launch)
+        self.assertEqual(args.port, 18927)
 
     def test_shortcut_flags_stay_in_entry_and_report_the_result(self) -> None:
         import entry

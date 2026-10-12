@@ -367,23 +367,36 @@
 ## 10. 安装与卸载的边界
 
 - `install.ps1`：探测解释器 → 建项目内 `.venv` → 装 `websocket-client`（官方 → 清华 → 阿里逐个回退，
-  **绝不关闭 TLS 校验**）→ 写 HKCU Run 键 → 注册读数条 → 打印状态。**幂等**，重复执行只补齐。
-- `uninstall.ps1`：删 Run 键 → 停守护 → `__goatDispose()` → 删 `.venv`。`%LOCALAPPDATA%\GOATGauge\`
-  默认保留，`-Purge` 才删。不碰宿主安装目录、不碰宿主 CSP、不碰用户快捷方式。
-- 两者都**不**创建/改写 Command Code 的**安装目录**、**机器级（`C:\ProgramData`）快捷方式**或开始菜单项；
-  带端口启动是一条独立命令，是否使用由用户决定。
+  **绝不关闭 TLS 校验**）→ 写 HKCU Run 键（**`entry.py --serve --inject`**，一个进程同时干服务、注入、
+  可选的一次性带端口拉起宿主）→ 打印状态。**幂等**，重复执行只补齐。
+- `uninstall.ps1`：删 Run 键 → 停服务与守护 → `__goatDispose()` → 删 `.venv`。`%LOCALAPPDATA%\GOATGauge\`
+  默认保留，`-Purge` 才删。不碰宿主安装目录、不碰宿主 CSP。
+- **L-7 自启动必须注册"完整形态"**：只跑 `--watch` 时服务缺席，后果是**静默降级**而非报错——
+  月份分母从套餐上限 `mplan`(10) 退成"本周期实测最大余量" `mest`(7.16)（屏上 `0/7.16`），
+  且 `gen`/`rate` 这类按 D-7 只由服务供给的指标永远不出现。2026-10-12 真机实测踩中：
+  `fp` 尾部 `src=-+host+sample+mest` ⇒ 无推送。`--watch` 保留为"只要 D2 纯宿主自给、不开 HTTP 端口"的
+  可选降级模式，但不再是默认注册项。`--port` 默认值同步改成 18927（`--status` 探测的就是它，
+  默认 0 会让自检永远报 `reachable: false`）。
+- 两者都**不**创建/改写 Command Code 的**安装目录**，也不新建开始菜单项；带端口启动是一条独立命令，
+  是否使用由用户决定。唯一的例外是下面 S1：`-WithShortcut` 会改**已存在的启动快捷方式**（含机器级那一个），
+  且默认关闭、可逐字还原。
 - **S1（可选，默认关）：`install.ps1 -WithShortcut` 允许改"当前用户自己账户下"的那一个 `.lnk`。**
   这是上游文档给所有用户的同款做法（`README.zh-CN.md:63`「将参数加到快捷方式目标末尾」）。硬约束：
   ① 只写 `Arguments` 一个字段，且**只追加缺失的开关**（幂等，重复执行不叠加）；
   ② 首次改动前把原值写进 `%LOCALAPPDATA%\GOATGauge\launch-shortcut.json`，并**再存一份 `.lnk` 字节副本**
   （`launch-shortcut.lnk.bak`）——WScript 的 `Save()` 会重写整个链接文件，只靠 JSON 不足以兜底；
   ③ `uninstall.ps1` 逐字还原并回读校验，还原成功才删备份；`-Purge` 之前必须先还原；
-  ④ `--status` 报 `launch_shortcut.state = ready|missing-args|absent|error`，让"双击有没有端口"可查。
+  ④ `--status` 报 `launch_shortcut.state = ready|partially-ready|missing-args|absent|unreadable`，
+  让"双击有没有端口"可查；
+  ⑤ 必须遍历**所有存在的**同名快捷方式（用户级 + 机器级 `C:\ProgramData`）。真机踩过：只改了用户级那个，
+  用户点的却是机器级那个（参数为空）⇒ 改动静默无效，看板照样不出现。机器级写入要提权，
+  install 与 uninstall **对称地各请求一次**（只在真的被拒时才提权）。
   失败模式必须写清：**已有无端口实例在跑时，带参数的启动只会聚焦旧窗口**（宿主 `requestSingleInstanceLock`），
   这条与上游 `ide/README.md:45` 的说明一致。
-- **S2（可选，默认关）：`install.ps1 -AutoLaunch` 让守护在开机那一次判定里，若宿主完全没运行就带端口拉起。**
+- **S2（可选，默认关）：`install.ps1 -AutoLaunch` 让开机那一次判定里，若宿主完全没运行就带端口拉起。**
   语义是**只判定一次**：第一眼看到宿主在跑（哪怕没端口）就永久放弃拉起，否则用户主动退出 Command Code 后
-  会被后台重新打开——那不再叫"跟随宿主"。开关随 Run 键一起注册（`entry.py --watch --auto-launch`）。
+  会被后台重新打开——那不再叫"跟随宿主"。该逻辑抽成 `watchdog.follow_startup_launch()`，由默认注册项
+  `entry.py --serve --inject --auto-launch` 与降级模式 `--watch --auto-launch` **共用**，判定与措辞只有一处。
 - **仍然禁止**：IFEO（Image File Execution Options）一类启动劫持。实测宿主的 GPU/网络/渲染子进程
   都是**同一个 exe** 带 `--type=…` 派生（`tasklist` 实据），而 IFEO 在 CreateProcess 层生效 ⇒ 它会拦下
   每一个子进程，写错就是宿主起不来；且它不随宿主更新消失，卸载器也不知道它存在 ⇒ 启动器一旦丢失，
@@ -391,4 +404,5 @@
 - **Run 键里那条命令必须被证明"能解析"，而不是"写着对"**：`pythonw` 无控制台，argparse 报错等于静默死亡。
   公开标志名（`--watch`）与守护进程内部标志名（`--follow`）之间的翻译是一张跨文件契约，
   只能靠一条把两侧串起来的测试守住（`tests/test_watchdog.py::EntryCLITests`）。
-  验收判据是 `--status` 里 `watchdog_pid != 0`；看不到进程就当没启动。
+  验收判据是 `--status` 里 `inject_pid != 0` 且 `gauge.reachable = true`（只看到 `watchdog_pid` 不足以证明
+  服务在跑——那正是 L-7 的残缺形态）；看不到进程就当没启动。

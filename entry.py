@@ -23,7 +23,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--auto-launch", action="store_true",
                         help="with --watch: start the host with a port once, when it is not running at all")
     parser.add_argument("--host", default="127.0.0.1", help="server host")
-    parser.add_argument("--port", type=int, default=0, help="server port; 0 chooses a free port")
+    parser.add_argument("--port", type=int, default=18927,
+                        help="server port; 18927 is what --status probes, 0 chooses a free port")
     parser.add_argument("--demo", action="store_true", help="show generated demo data")
     parser.add_argument("--no-browser", action="store_true", help="do not open Chrome in --chrome mode")
     parser.add_argument(
@@ -96,7 +97,8 @@ def main() -> None:
 
     from app.server import run_foreground
 
-    run_foreground(host=args.host, port=args.port, demo=args.demo, inject=args.inject)
+    run_foreground(host=args.host, port=args.port, demo=args.demo, inject=args.inject,
+                   auto_launch=args.auto_launch)
 
 
 if __name__ == "__main__":
