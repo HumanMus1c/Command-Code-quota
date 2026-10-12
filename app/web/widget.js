@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "12";
+  const VERSION = "13";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -152,7 +152,10 @@
     shedLevel: -1,
     shedChanges: [],
     levelChanges: 0,
+    fitWidth: 0,
     climb: true,
+    boardLog: [],
+    boardChanges: 0,
     // Spec A-5: each await below is checked against this generation, so a reply
     // that lands after a thread switch can never paint the previous conversation.
     generation: 0,
@@ -702,8 +705,12 @@
         setFlag(target, cls, source.classList.contains(cls));
       }
     }
-    const style = source.getAttribute("style") || "";
-    setAttr(target, "style", style);
+    const style = source.getAttribute("style");
+    if (style === null) {
+      removeAttr(target, "style");
+    } else {
+      setAttr(target, "style", style);
+    }
 
     const wanted = [...source.childNodes];
     const current = [...target.childNodes];
@@ -753,9 +760,6 @@
         });
       }
       row.innerHTML = parts.join("");
-      // A rebuild hands back every countdown and bar, so the level the row holds no
-      // longer matches the one we recorded: re-judge it from the single line down.
-      state.climb = true;
       // Slots are taken from what the DOM actually holds, so a substrate that
       // models fewer elements than we generated (the string-level shim) keeps
       // taking the full-write path instead of patching the wrong node.
@@ -831,6 +835,34 @@
     } else {
       fit(root, node);
     }
+    observeBoard(row, node);
+  }
+
+  /* The height jitter cannot be reproduced in the fixture (its data is constant by
+   * construction) and an idle window on the host never showed it, so it has to be
+   * caught in the act by the board itself: every time the rendered height or the
+   * membership moves, the transition is logged with its timestamp. The log is a
+   * ring of the last moves plus a total, so a fast flicker is still measurable
+   * after the buffer wrapped. */
+  function observeBoard(row, node) {
+    const height = Math.round(row.clientHeight);
+    const board = chips(row).map((chipNode) => chipNode.dataset.metric || "tool").join("+");
+    const last = state.boardLog[state.boardLog.length - 1];
+    if (last && last.h === height && last.board === board) {
+      return;
+    }
+    state.boardChanges += 1;
+    if (state.boardLog.length >= 24) {
+      state.boardLog.shift();
+    }
+    state.boardLog.push({
+      t: Math.round(now() / 1000),
+      h: height,
+      chips: row.childElementCount,
+      level: state.shedLevel,
+      tier: node.dataset.layout,
+      board,
+    });
   }
 
   /* The host ships Tailwind-style channel values ("134 61% 67%", sometimes with
@@ -912,13 +944,17 @@
    * 0..N means N decorations are hidden in priority order, and once every
    * decoration is gone the height budget goes instead. A poll only reads the
    * measurement and steps the level down when the row proves it is overflowing,
-   * so a board whose width did not change writes no class at all. Climbing back
-   * up costs the width a lower level would need, which can only be measured by
-   * un-shedding first - so that happens on a real resize or a rebuilt row, never
-   * per poll. */
+   * so a board whose width did not change writes no class at all. Climbing back up
+   * costs the width a lower level would need, which can only be measured by
+   * un-shedding first - so the *only* event allowed to re-open the decision is the
+   * available width changing. A rebuilt row re-applies the level it already has. */
   function fit(root, node) {
     const row = root.getElementById("row");
     let level = state.shedLevel;
+    // The width this tier was judged against. A resize callback reporting the same
+    // width is our own height change coming back around, and re-judging for it is
+    // what made the board alternate between one line and two on a stable layout.
+    state.fitWidth = row.clientWidth;
     if (state.climb || level < 0) {
       // Force the no-wrap state before measuring: scrollWidth is only an honest
       // "does it fit on one line" reading while the row is not already wrapping.
@@ -937,6 +973,8 @@
       applyLevel(row, 0);
       state.climb = false;
       setData(node, "layout", "wrapped");
+    } else {
+      applyLevel(row, level);
     }
     while (row.scrollHeight > row.clientHeight + 1) {
       if (!applyLevel(row, level + 1)) {
@@ -1161,9 +1199,14 @@
     fitQueued = true;
     const step = () => {
       fitQueued = false;
-      // The width itself moved, which is the one event that can buy presentation
-      // back, so this is where climbing is allowed to measure the lower levels.
-      state.climb = true;
+      const node = document.getElementById(ID);
+      const row = node && node.shadowRoot ? node.shadowRoot.getElementById("row") : null;
+      // Only the width the tier was judged against can buy presentation back. The
+      // observer also fires for our own height changes, and re-opening the decision
+      // for those is a two-state oscillator: wrap, grow, observe, re-judge, unwrap.
+      if (row && row.clientWidth !== state.fitWidth) {
+        state.climb = true;
+      }
       render();
     };
     if (typeof requestAnimationFrame === "function") {
@@ -1614,6 +1657,45 @@
     ].join("|");
   }
 
+  /* The editor's action row lives on a wrapped line, so "the user cannot see 取消
+   * / 保存 / 添加" has several possible causes - our own clip, an ancestor clip, or
+   * host chrome painted over us - and they need different fixes. This reports who
+   * actually owns the point at the centre of that row and which ancestors clip. */
+  function editorGeometry(row, node) {
+    const tools = row.querySelector(".tools");
+    if (!tools) {
+      return null;
+    }
+    const box = tools.getBoundingClientRect();
+    let owner = null;
+    if (typeof document.elementFromPoint === "function") {
+      const hit = document.elementFromPoint(Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2));
+      owner = hit === node || (hit && node.contains && node.contains(hit)) ? "ours"
+        : hit ? `${hit.nodeName}#${hit.id || ""}.${String(hit.className || "").slice(0, 28)}` : "none";
+    }
+    const clipped = [];
+    for (let ancestor = node.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      let style = null;
+      try {
+        style = getComputedStyle(ancestor);
+      } catch {
+        break;
+      }
+      if (style && /hidden|clip|auto|scroll/.test(`${style.overflowY} ${style.overflowX}`)) {
+        clipped.push(`${ancestor.nodeName}#${ancestor.id || ""}.${String(ancestor.className || "").slice(0, 28)}` +
+          `@${Math.round(ancestor.getBoundingClientRect().bottom)}`);
+      }
+    }
+    return {
+      top: Math.round(box.top),
+      bottom: Math.round(box.bottom),
+      rowBottom: Math.round(row.getBoundingClientRect().bottom),
+      hostBottom: Math.round(node.getBoundingClientRect().bottom),
+      owner,
+      clipped,
+    };
+  }
+
   window.__goatProbe = () => ({
     mounted: Boolean(document.getElementById(ID)),
     version: window.__goatWidgetVersion || "",
@@ -1622,6 +1704,12 @@
     pushed: Boolean(state.pushed),
     layout: (document.getElementById(ID) || {}).dataset ? document.getElementById(ID).dataset.layout : "",
     editing: layout.editing,
+    fitWidth: state.fitWidth,
+    editor: (() => {
+      const node = document.getElementById(ID);
+      const row = node && node.shadowRoot ? node.shadowRoot.getElementById("row") : null;
+      return row ? editorGeometry(row, node) : null;
+    })(),
     metrics: currentLayout(),
     dark: (document.getElementById(ID) || {}).dataset ? document.getElementById(ID).dataset.dark : "",
     fingerprint: fingerprint(),
@@ -1631,6 +1719,8 @@
     shedLevel: state.shedLevel,
     shedChanges: state.shedChanges,
     levelChanges: state.levelChanges,
+    boardChanges: state.boardChanges,
+    boardLog: state.boardLog,
   });
 
   // Scriptable surface for the injector and for tests; also the only way to

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-WIDGET_VERSION = "12"
+WIDGET_VERSION = "13"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "[::1]"})
 MAX_PORT_FILE_BYTES = 1024
 MAX_TARGETS_BYTES = 1_000_000
