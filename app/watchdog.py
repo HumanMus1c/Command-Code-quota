@@ -18,6 +18,7 @@ import re
 import subprocess
 import tempfile
 import time
+import traceback
 import urllib.request
 import uuid
 from pathlib import Path
@@ -43,6 +44,7 @@ ATTACH_INTERVAL = 2.5
 LISTENER_RECHECK = 30.0
 TICK = 0.5
 LOCK_NAME = "watchdog.lock"
+LOG_NAME = "watchdog.log"
 PROBE_NAME = "probe.json"
 MAX_PROBE_BYTES = 262_144
 ACCOUNT_HASH = re.compile(r"^[0-9a-f]{12}$")
@@ -452,6 +454,7 @@ def follow(
     ):
         log("已有守护进程在跟随 Command Code，本实例退出。")
         return 0
+    log(f"守护启动：pid={os.getpid()} auto_launch={'on' if auto_launch else 'off'}")
     injector = WidgetInjector(profile=profile, payload_builder=dict, log=log)
     port: int | None = None
     next_check = 0.0
@@ -489,10 +492,34 @@ def follow(
             sleeper(TICK)
     except KeyboardInterrupt:
         pass
+    except BaseException:  # noqa: BLE001 - a daemon with no console must leave a trace
+        log("守护进程异常退出：\n" + traceback.format_exc())
+        raise
     finally:
+        log("守护进程退出。")
         injector.detach_all()
         release_lock(lock, token=token)
     return 0
+
+
+def file_logger(path: Path, clock: Callable[[], float] = time.time) -> Callable[[str], None]:
+    """Append with timestamps, and never let logging break the loop it is logging.
+
+    ``pythonw`` has no console, so without this the watchdog can die mid-session and
+    leave nothing behind - which is exactly how the ``--watch`` argparse mismatch
+    stayed invisible for a whole day.
+    """
+
+    def log(message: str) -> None:
+        line = f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(clock()))} {message}{os.linesep}"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(line)
+        except OSError:
+            pass
+
+    return log
 
 
 INJECT_LOCK_NAME = "inject.lock"
@@ -615,7 +642,7 @@ def main(argv: list[str] | None = None) -> int:
                    "running-without-port": result.get("hint", ""), "no-host": result.get("hint", "")}
         print(message.get(str(result.get("state")), ""), flush=True)
         return 0 if result.get("ok") else 2
-    return follow(auto_launch=args.auto_launch)
+    return follow(auto_launch=args.auto_launch, log=file_logger(runtime_dir() / LOG_NAME))
 
 
 if __name__ == "__main__":

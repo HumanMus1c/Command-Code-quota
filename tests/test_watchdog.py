@@ -235,7 +235,21 @@ class FollowTests(unittest.TestCase):
         logs, injector = self._run([None, None, None, None], capture, stops_after=4)
         self.assertEqual(injector.count, 0)
         self.assertEqual(injector.detach_calls, 0)
-        self.assertEqual(logs, [])
+        lifecycle = [line for line in logs if "守护启动" not in line and "守护进程退出" not in line]
+        self.assertEqual(lifecycle, [], "空转期间不该有任何 attach/detach 记录")
+
+    def test_follow_records_its_own_start_and_exit(self) -> None:
+        # pythonw has no console: without these two lines a silent death is invisible.
+        logs, _injector = self._run([None, None, None, None], lambda argv: "")
+        self.assertIn("守护启动", logs[0])
+        self.assertIn("守护进程退出", logs[-1])
+
+    def test_file_logger_writes_and_never_raises(self) -> None:
+        path = watchdog.runtime_dir() / watchdog.LOG_NAME
+        watchdog.file_logger(path)("守护启动：pid=1")
+        self.assertIn("守护启动", path.read_text(encoding="utf-8"))
+        broken = watchdog.file_logger(Path(self.dir) / "no" / "such" / "dir" / "x.log")
+        broken("写不进去也不许抛")
 
     def test_second_instance_backs_off(self) -> None:
         lock = watchdog.runtime_dir() / watchdog.LOCK_NAME
