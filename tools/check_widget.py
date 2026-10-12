@@ -190,6 +190,26 @@ PROBE = "JSON.stringify(window.__goatProbe())"
 
 SHAPES = "JSON.stringify((window.__goatProbe().shapeChanges || []).slice(0,2))"
 
+# Push derived data in, then let it lapse: the chip that leaves the board is worth
+# tens of pixels of re-flow, which is the height jitter that was reported.
+PUSH_RATE = """((on) => JSON.stringify(window.__goatUpdate({
+  version: window.__goatWidgetVersion,
+  server_time: Date.now(),
+  rates: on ? {tokens_per_sec: 40, requests_per_min: 1.5} : {},
+  projections: on ? {five_hour: {burn_per_hour: 2.5, verdict: "after_reset"}} : {},
+})))(%s)"""
+
+GEOMETRY = """
+(() => {
+  const row = document.getElementById('goat-gauge-widget').shadowRoot.getElementById('row');
+  return JSON.stringify({
+    height: row.clientHeight,
+    board: [...row.querySelectorAll('.chip[data-metric]')].map((c) => c.dataset.metric).join('+'),
+    idle: row.querySelectorAll('.chip.idle').length,
+  });
+})()
+"""
+
 # Narrow the composer column so the row is under real width pressure: the board
 # must degrade presentation, and then leave it alone while the data holds still.
 NARROW = """
@@ -245,7 +265,10 @@ def main() -> int:
         print("no Edge or Chrome found; cannot run the browser harness")
         return 2
 
-    web_root = ROOT / "app" / "web"
+    # An optional directory lets the same assertions run against a baseline copy
+    # (git show HEAD:app/web/widget.js), so a new assertion can be shown to fail
+    # on the code it is meant to guard.
+    web_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "app" / "web"
     server, port = start_static_server(web_root)
     profile = Path(tempfile.mkdtemp(prefix="goat-widget-harness-"))
     process = None
@@ -349,6 +372,22 @@ def main() -> int:
             "correctness: the changed number and bar width actually moved",
             before.get("value") != after.get("value") and bool(after.get("value")),
             f"{before.get('value')} -> {after.get('value')} / {after.get('width')}",
+        ))
+
+        # Last, because these pushes change the data the earlier windows measure.
+        harness.evaluate(PUSH_RATE % "true")
+        time.sleep(0.6)
+        with_data = json.loads(harness.evaluate(GEOMETRY) or "{}")
+        ack_off = harness.evaluate(PUSH_RATE % "false")
+        time.sleep(0.6)
+        lapsed = json.loads(harness.evaluate(GEOMETRY) or "{}")
+        results.append((
+            "lapse: a metric that ran out of data keeps its slot and the height",
+            "gen" in str(with_data.get("board"))
+            and with_data.get("board") == lapsed.get("board")
+            and with_data.get("height") == lapsed.get("height")
+            and lapsed.get("idle", 0) >= 1,
+            f"ack={ack_off} {json.dumps(with_data)} -> {json.dumps(lapsed)}",
         ))
 
         connection.close()
