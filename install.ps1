@@ -149,12 +149,17 @@ function Get-WatchArguments {
 function Set-LaunchShortcut {
     $ErrorActionPreference = 'Continue'
     $report = & $VenvPy $EntryPy --install-shortcut 2>&1 | Out-String
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "已给你自己的启动快捷方式加上调试端口参数（原值已备份，uninstall 可还原）。"
-    } else {
-        Write-Bad "快捷方式未改动：$($report.Trim())"
-    }
     Write-Done ($report.Trim())
+    if ($LASTEXITCODE -eq 0) {
+        Write-Ok "所有启动快捷方式都已带上调试端口参数（原值已备份，uninstall 可还原）。"
+        return
+    }
+    if ($report -notmatch 'denied-or-error') { Write-Bad "快捷方式未改动。"; return }
+    # 机器级（ProgramData）那个 .lnk 普通用户写不动；开始菜单搜索常常解析到它，
+    # 只改用户级等于没改。请求一次提权（本机 UAC 已关弹窗，静默通过）。
+    Write-Bad "机器级快捷方式需要管理员权限，正在请求一次提权。"
+    Start-Process -FilePath $VenvPy -ArgumentList @("`"$EntryPy`"", '--install-shortcut') -Verb RunAs -WindowStyle Hidden -Wait
+    Write-Done ((& $VenvPy $EntryPy --install-shortcut 2>&1 | Out-String).Trim())
 }
 
 function Register-Autostart {

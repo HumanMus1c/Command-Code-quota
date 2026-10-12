@@ -75,15 +75,21 @@ if ($stopped) { Write-Ok "已结束 $stopped 个守护进程。" } else { Write-
 Write-Step "还原启动快捷方式（若安装时改过）"
 if ($hasVenv) {
     $restored = (& $VenvPy $EntryPy --uninstall-shortcut 2>&1 | Out-String)
+    if ($LASTEXITCODE -ne 0 -and $restored -match 'differs') {
+        # 机器级那个要管理员权限才写得动，和安装时对称地请求一次。
+        Write-Bad "机器级快捷方式需要管理员权限还原，正在请求一次提权。"
+        Start-Process -FilePath $VenvPy -ArgumentList @("`"$EntryPy`"", '--uninstall-shortcut') -Verb RunAs -WindowStyle Hidden -Wait
+        $restored = (& $VenvPy $EntryPy --uninstall-shortcut 2>&1 | Out-String)
+    }
     if ($LASTEXITCODE -eq 0) {
         if ($restored -match 'nothing-to-restore') { Write-Done "没改过快捷方式，无需还原。" }
-        else { Write-Ok "已把 Arguments 还原成安装前的原值。" }
+        else { Write-Ok "已把每个快捷方式的 Arguments 还原成安装前的原值。" }
     } else {
-        Write-Skip "还原失败，请手动检查快捷方式；原始 .lnk 副本留在数据目录里。$($restored.Trim())"
+        Write-Skip "还原失败，请手动检查；原始 .lnk 副本留在数据目录里。$($restored.Trim())"
     }
     Write-Done ($restored.Trim())
 } else {
-    Write-Skip "没有 .venv，无法自动还原；备份仍在数据目录（launch-shortcut.json / launch-shortcut.lnk.bak）。"
+    Write-Skip "没有 .venv，无法自动还原；备份仍在数据目录（launch-shortcut.json / launch-shortcut-*.lnk.bak）。"
 }
 
 Write-Step "注销开机自启"

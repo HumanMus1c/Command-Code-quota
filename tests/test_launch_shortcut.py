@@ -94,15 +94,16 @@ class ShortcutRoundTripTests(unittest.TestCase):
     def test_apply_then_restore_returns_the_original_arguments_exactly(self) -> None:
         result = launch_shortcut.apply(self.link)
         self.assertTrue(result["ok"], json.dumps(result))
-        self.assertEqual(result["state"], "patched")
-        self.assertIn("--keep-me", result["after"])
-        self.assertTrue(launch_shortcut.has_all(result["after"]))
+        one = result["results"][0]
+        self.assertEqual(one["state"], "patched")
+        self.assertIn("--keep-me", one["after"])
+        self.assertTrue(launch_shortcut.has_all(one["after"]))
         self.assertTrue((self.dir / launch_shortcut.BACKUP_NAME).exists())
-        self.assertTrue((self.dir / launch_shortcut.LNK_BACKUP_NAME).exists())
+        self.assertTrue((self.dir / launch_shortcut.lnk_backup_name(self.link)).exists())
 
         restored = launch_shortcut.restore()
         self.assertTrue(restored["ok"], json.dumps(restored))
-        self.assertEqual(restored["actual"], "--keep-me")
+        self.assertEqual(restored["results"][0]["actual"], "--keep-me")
         self.assertFalse((self.dir / launch_shortcut.BACKUP_NAME).exists())
 
     def test_second_apply_changes_nothing_and_reports_already(self) -> None:
@@ -111,7 +112,28 @@ class ShortcutRoundTripTests(unittest.TestCase):
         second = launch_shortcut.apply(self.link)
         self.assertEqual(second["state"], "already")
         self.assertEqual(launch_shortcut.read(self.link)["arguments"], before)
-        self.assertIn("--keep-me", first["after"])
+        self.assertIn("--keep-me", first["results"][0]["after"])
+
+    def test_every_existing_shortcut_gets_patched_not_just_the_user_one(self) -> None:
+        # The live failure: the user clicked the Start Menu entry we had not touched,
+        # so the launch carried no arguments at all and no board appeared.
+        launch_shortcut.apply(self.link)
+        second = self.dir / "sub" / "Command Code.lnk"
+        second.parent.mkdir()
+        make_shortcut(second, str(self.notepad), "")
+        with mock.patch.object(launch_shortcut, "candidates", lambda env=None: [self.link, second]):
+            self.assertEqual([item["shortcut"] for item in launch_shortcut.inspect()["entries"]],
+                             [str(self.link), str(second)])
+            self.assertEqual(launch_shortcut.inspect()["state"], "partially-ready")
+            self.assertEqual(launch_shortcut.inspect()["missing"], [str(second)])
+            result = launch_shortcut.apply()
+        self.assertTrue(result["ok"], json.dumps(result))
+        self.assertEqual({item["state"] for item in result["results"]}, {"patched", "already"})
+        with mock.patch.object(launch_shortcut, "candidates", lambda env=None: [self.link, second]):
+            report = launch_shortcut.inspect()
+        self.assertEqual(report["state"], "ready")
+        self.assertEqual(len(report["ready"]), 2)
+        self.assertEqual(report["missing"], [])
 
     def test_restore_without_backup_is_not_an_error(self) -> None:
         self.assertEqual(launch_shortcut.restore()["state"], "nothing-to-restore")

@@ -22,7 +22,6 @@ from typing import Any, Callable
 DEBUG_ARGS = ("--remote-debugging-port=0", "--remote-debugging-address=127.0.0.1")
 SHORTCUT_NAME = "Command Code.lnk"
 BACKUP_NAME = "launch-shortcut.json"
-LNK_BACKUP_NAME = "launch-shortcut.lnk.bak"
 
 READ_SCRIPT = """$ErrorActionPreference = 'Stop'
 try {{
@@ -55,6 +54,29 @@ def default_shortcut(env: dict[str, str] | None = None) -> Path:
     appdata = (source.get("APPDATA") or "").strip()
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / SHORTCUT_NAME
+
+
+def machine_shortcut(env: dict[str, str] | None = None) -> Path:
+    """The all-users entry the installer created. Start Menu search often resolves to
+    this one instead of the per-user file, so patching only the latter leaves a
+    double-click that carries no arguments - measured on the live machine."""
+    source = env if env is not None else _environ()
+    root = (source.get("ProgramData") or "").strip()
+    base = Path(root) if root else Path("C:\\ProgramData")
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / SHORTCUT_NAME
+
+
+def candidates(env: dict[str, str] | None = None) -> list[Path]:
+    """Every existing shortcut by which the host can be launched from the shell."""
+    found: list[Path] = []
+    for path in (default_shortcut(env), machine_shortcut(env)):
+        if path.exists() and path not in found:
+            found.append(path)
+    return found
+
+
+def scope_of(path: Path) -> str:
+    return "user" if str(path).lower().startswith("c:\\users") else "machine"
 
 
 def _environ() -> dict[str, str]:
@@ -110,64 +132,142 @@ def backup_path() -> Path:
     return runtime_dir() / BACKUP_NAME
 
 
-def apply(shortcut: Path | None = None, *, capture: Callable[[list[str]], str] | None = None) -> dict[str, Any]:
-    """Add the debugging arguments once, keeping whatever the user already had."""
-    shortcut = shortcut or default_shortcut()
+def lnk_backup_name(shortcut: Path) -> str:
+    return f"launch-shortcut-{scope_of(shortcut)}.lnk.bak"
+
+
+def _load_entries(record: Path) -> dict[str, Any]:
+    if not record.exists():
+        return {}
+    try:
+        payload = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    if isinstance(entries, dict):
+        return {str(key): dict(value) for key, value in entries.items()}
+    # First release stored a single shortcut at the top level.
+    if isinstance(payload, dict) and "shortcut" in payload:
+        return {str(payload["shortcut"]): {"arguments": payload.get("arguments", ""),
+                                           "target": payload.get("target", "")}}
+    return {}
+
+
+def _save_entries(record: Path, entries: dict[str, Any]) -> None:
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps({"entries": entries}, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8"
+    )
+
+
+def _patch_one(shortcut: Path, record: Path, entries: dict[str, Any],
+               capture: Callable[[list[str]], str] | None) -> dict[str, Any]:
+    base = {"shortcut": str(shortcut), "scope": scope_of(shortcut)}
     current = read(shortcut, capture=capture)
     if current["state"] != "ok":
-        return {"ok": False, "state": current["state"], "shortcut": str(shortcut)}
-    record = backup_path()
+        return {**base, "ok": False, "state": current["state"]}
     if has_all(current["arguments"]):
-        return {"ok": True, "state": "already", "shortcut": str(shortcut),
-                "arguments": current["arguments"], "backed_up": record.exists()}
-    if not record.exists():
-        record.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"shortcut": str(shortcut), "arguments": current["arguments"], "target": current["target"]}
-        record.write_text(json.dumps(payload, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
-        shutil.copy2(shortcut, record.parent / LNK_BACKUP_NAME)
+        return {**base, "ok": True, "state": "already", "arguments": current["arguments"]}
+    if str(shortcut) not in entries:
+        # Back up before the first write, twice: the exact Arguments string, and the
+        # whole file, because Save() rewrites the link and can drop fields we never read.
+        entries[str(shortcut)] = {"arguments": current["arguments"], "target": current["target"]}
+        _save_entries(record, entries)
+        try:
+            shutil.copy2(shortcut, record.parent / lnk_backup_name(shortcut))
+        except OSError:
+            pass
     merged = merge_arguments(current["arguments"])
     written = _run(WRITE_SCRIPT.format(path=quote(str(shortcut)), args=quote(merged)), capture)
     if written.get("ERR"):
-        return {"ok": False, "state": "error", "shortcut": str(shortcut), "error": written["ERR"]}
+        return {**base, "ok": False, "state": "denied-or-error", "error": written["ERR"]}
     after = read(shortcut, capture=capture)
-    return {"ok": has_all(after["arguments"]), "state": "patched" if after["state"] == "ok" else after["state"],
-            "shortcut": str(shortcut), "before": current["arguments"], "after": after["arguments"],
-            "backup": str(record)}
+    return {**base, "ok": has_all(after.get("arguments", "")), "state": "patched",
+            "before": current["arguments"], "after": after.get("arguments", "")}
+
+
+def apply(shortcut: Path | None = None, *, capture: Callable[[list[str]], str] | None = None) -> dict[str, Any]:
+    """Add the debugging arguments once to every launch shortcut that exists.
+
+    Both the per-user entry and the installer's all-users entry are patched: the Start
+    Menu search result the user actually clicks is frequently the machine-wide one, so
+    a per-user-only patch silently does nothing.
+    """
+    paths = [shortcut] if shortcut is not None else candidates()
+    if not paths:
+        return {"ok": False, "state": "absent", "results": []}
+    record = backup_path()
+    entries = _load_entries(record)
+    results = [_patch_one(path, record, entries, capture) for path in paths]
+    patched = [item for item in results if item["state"] == "patched"]
+    failed = [item for item in results if not item["ok"]]
+    state = "patched" if patched else ("already" if not failed else failed[0]["state"])
+    return {"ok": not failed, "state": state, "results": results, "backup": str(record),
+            "elevated_for": [item["shortcut"] for item in failed] if failed else []}
 
 
 def restore(*, capture: Callable[[list[str]], str] | None = None) -> dict[str, Any]:
     """Put back exactly the arguments we found before the first patch."""
     record = backup_path()
-    if not record.exists():
+    entries = _load_entries(record)
+    if not entries:
         return {"ok": True, "state": "nothing-to-restore"}
-    try:
-        payload = json.loads(record.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return {"ok": False, "state": "unreadable-backup", "error": type(exc).__name__}
-    shortcut = Path(str(payload.get("shortcut") or default_shortcut()))
-    original = str(payload.get("arguments") or "")
-    written = _run(WRITE_SCRIPT.format(path=quote(str(shortcut)), args=quote(original)), capture)
-    if written.get("ERR"):
-        return {"ok": False, "state": "error", "shortcut": str(shortcut), "error": written["ERR"]}
-    after = read(shortcut, capture=capture)
-    exact = after.get("arguments", "") == original
-    if exact:
+    results: list[dict[str, Any]] = []
+    for raw_path, stored in list(entries.items()):
+        shortcut = Path(raw_path)
+        original = str(stored.get("arguments") or "")
+        if not shortcut.exists():
+            results.append({"shortcut": raw_path, "ok": True, "state": "gone"})
+            del entries[raw_path]
+            continue
+        written = _run(WRITE_SCRIPT.format(path=quote(raw_path), args=quote(original)), capture)
+        after = read(shortcut, capture=capture)
+        exact = not written.get("ERR") and after.get("arguments", "") == original
+        if exact:
+            del entries[raw_path]
+            (record.parent / lnk_backup_name(shortcut)).unlink(missing_ok=True)
+        results.append({"shortcut": raw_path, "ok": exact,
+                        "state": "restored" if exact else "differs",
+                        "expected": original, "actual": after.get("arguments", "")})
+    if entries:
+        _save_entries(record, entries)
+    else:
         record.unlink(missing_ok=True)
-        (record.parent / LNK_BACKUP_NAME).unlink(missing_ok=True)
-    return {"ok": exact, "state": "restored" if exact else "differs", "shortcut": str(shortcut),
-            "expected": original, "actual": after.get("arguments", "")}
+    return {"ok": all(item["ok"] for item in results), "state": "restored", "results": results}
 
 
 def inspect(shortcut: Path | None = None, *, capture: Callable[[list[str]], str] | None = None) -> dict[str, Any]:
     """Reported by ``--status``: whether a plain double-click would carry the port."""
-    shortcut = shortcut or default_shortcut()
-    current = read(shortcut, capture=capture)
-    if current["state"] != "ok":
-        return {"state": current["state"], "shortcut": str(shortcut)}
+    paths = [shortcut] if shortcut is not None else candidates()
+    if not paths:
+        return {"state": "absent", "shortcut": str(default_shortcut()), "entries": []}
+    entries: list[dict[str, Any]] = []
+    for path in paths:
+        current = read(path, capture=capture)
+        entries.append({
+            "scope": scope_of(path),
+            "shortcut": str(path),
+            "state": current["state"],
+            "arguments": current.get("arguments", ""),
+        })
+    usable = [item for item in entries if item["state"] == "ok"]
+    ready = [item for item in usable if has_all(item["arguments"])]
+    if usable and len(ready) == len(usable):
+        state = "ready"
+    elif ready:
+        state = "partially-ready"
+    elif usable:
+        state = "missing-args"
+    elif all(item["state"] == "absent" for item in entries):
+        state = "absent"
+    else:
+        state = "unreadable"
     return {
-        "state": "ready" if has_all(current["arguments"]) else "missing-args",
-        "shortcut": str(shortcut),
-        "target": current["target"],
-        "arguments": current["arguments"],
+        "state": state,
+        "shortcut": str(paths[0]),
+        "entries": entries,
+        "ready": [item["shortcut"] for item in ready],
+        "missing": [item["shortcut"] for item in entries if item.get("state") == "ok"
+                    and not has_all(item["arguments"])],
         "backed_up": backup_path().exists(),
     }
