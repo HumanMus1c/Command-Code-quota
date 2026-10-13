@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "18";
+  const VERSION = "19";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -1288,8 +1288,12 @@
   }
 
   const STYLE = `
+/* cursor:default goes on the host, not on the chips: the I-beam appears over any
+ * text box whose cursor is auto, and a readout is nothing but text boxes.
+ * Selection itself stays available outside the editor - only the caret shape is
+ * normalised, so selecting a number never looks like a drag handle. */
 :host{display:block;font-family:var(--goat-font,inherit);font-size:11.5px;line-height:1.4;
-  color:inherit;position:relative}
+  color:inherit;position:relative;cursor:default}
 :host([data-layout="blocked"]){visibility:hidden;pointer-events:none}
 #row{display:flex;align-items:center;gap:7px;flex-wrap:nowrap;overflow:hidden;
   margin:0 auto;max-width:100%;padding:3px 8px;border-radius:8px;
@@ -1298,7 +1302,10 @@
   font-variant-numeric:tabular-nums}
 :host([data-layout="wrapped"]) #row{flex-wrap:wrap;max-height:calc(4.2em + 16px);row-gap:2px}
 :host([data-layout="tall"]) #row{flex-wrap:wrap;max-height:none;row-gap:2px}
-:host([data-edit="on"]) #row{flex-wrap:wrap;max-height:none;overflow:visible;row-gap:5px}
+/* The editor is all pointer: a press-drag across chips is a reorder, and the
+ * browser reading it as a text selection paints the board purple. */
+:host([data-edit="on"]) #row{flex-wrap:wrap;max-height:none;overflow:visible;row-gap:5px;
+  user-select:none;-webkit-user-select:none}
 .chip{position:relative;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;
   opacity:.9;padding:2px 5px;border:1px solid transparent;border-radius:7px;
   transition:background .12s ease,border-color .12s ease,box-shadow .12s ease}
