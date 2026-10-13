@@ -54,6 +54,14 @@
   按 origin 比较会既不挂载又零报错（`app/inject.py:66-79` 的 `origin_of()` 已按此实现）。
 - **N-4 全页只允许一份读数条**，且必须在 open Shadow DOM 内（`widget.js:851` `attachShadow({mode:"open"})`）。
   样式走 `style.textContent`（`style-src` 已允许 `'unsafe-inline'`），不注入宿主 `<head>`。
+  **"一份"的判据是闭包所有权，不是节点存在性**：每个闭包只允许绘制自己 `build()` 出来的那个节点
+  （`state.node`），`render()`/`refit()`/`tick()` 遇到"id 应答的节点不是我的"就一律不改写；
+  接管时必须先调用上一任的 `__goatDispose()`（同版本也一样），否则宿主 React 摘掉节点的瞬间，
+  旧闭包的心跳与轮询会**领养新节点**并按自己内存里的 layout 复画——真机实测后果是同一颗指标画两次、
+  邻居被挤掉、状态点被指标覆盖，且 `__goatProbe()`（属于最后一任闭包）看着完全正常。
+  `dispose` 必须撤销它挂上的**每一种**监听：`resize`、`MutationObserver`、`ResizeObserver`、定时器，
+  以及 `visibilitychange`（漏掉这一条时，"已卸载"的闭包会在下一次切回前台重新开机）。
+  回归用例：`check_widget.py` 的 `painter: the row stays exactly the layout across every poll`。
 - **N-5 几何优先于覆盖。** 窄到放不下一个胶囊、或宿主可点击控件被真实遮挡时，整体隐藏（`blocked`），
   **绝不覆盖宿主控件、绝不改宿主任何分支的 flex/min-width**。dispose 前后宿主内联样式必须逐字节相同。
   两条**当前代码尚未满足**：
@@ -177,6 +185,8 @@
   `test_attach_swallows_a_transport_error_instead_of_dying`（红/绿在 `git archive` 基线副本上做过）。
 - **L-5 幂等**：同一份源码重复注入不得产生第二个节点；源码指纹变化时才清理并替换（`WIDGET_VERSION`
   `inject.py:24` 与 `widget.js` 内部版本必须同步，不一致的 payload 直接丢弃）。
+  幂等**不等于"什么都不做"**：`window.__goatWidgetVersion` 与版本一致但节点已被宿主摘掉时，
+  重注入必须走 N-4 的接管路径（先 dispose 再建），而不是"再挂一个闭包"或"领养别人的节点"。
 - **L-6 写用户数据目录必须原子且不越界**（当前代码**尚未**满足：`watchdog.py` 与 `install.ps1` 尚未落地，
   现有 `credentials.py` 的 DPAPI 写入同样要按本条复核）：
   - 一律"**同目录 temp 文件写完 → `os.replace`**"，禁止就地截断重写（上游同一做法：`manage.py:36-40`）；
@@ -205,6 +215,12 @@
   被用户**隐藏**的指标保持原位（成员恒定后，"暂时没数据"不再是离开板面的理由，见 D-2 补充），
   否则一次偶发空窗会永久打乱用户布局。所有事件在 Shadow DOM 内委托并
   `stopPropagation`，不漏给宿主输入框。
+  **DOM 只有在"正好是这块板"时才算用户意图**：`commitDomOrder()` 先按当前 layout 的可见集合校验——
+  出现重复 id、缺少某颗在板指标、或多出 layout 里没有的 id ⇒ 整笔提交作废。读 `localStorage` 时同样
+  对 `order`/`hidden` 去重。理由：拖动结束是从 DOM 反读顺序的，若有别的写入者（见 N-4）把
+  `week` 画了两遍并挤掉 `cache`，不去重的提交会把这份脏 DOM 固化成用户的布局，指标就**永久**少一个。
+  回归用例：`storage: a duplicated order entry is read once`、
+  `commit: a duplicated or missing metric in the row is never baked in`。
 - **P-7 呈现状态必须可量化自证**（当前代码**尚未**满足：`__goatProbe()` 现只回读
   `mounted / version / host / hostError / pushed / layout / editing / metrics`，见 `widget.js:1004-1012`）。
   把它扩成一段**布局指纹**，至少含：`dataset.state`、`dataset.layout`、`dataset.edit`、当前语言标签、主题签名、
@@ -243,6 +259,28 @@
     环形 24 条 + 无界总数）。同理，编辑态动作行的可见性有三种候选成因（自身裁剪 / 祖先裁剪 / 宿主控件盖在上面），
     `__goatProbe().editor` 用 `elementFromPoint` 报告动作行中心"归谁所有"以及祖先溢出裁剪链，一次读取即可定性。
 
+- **P-11 拖动重排是"移动元素"，不是"重画这一行"**（`paint()` 的 `movable` 分支）：成员与键集不变、
+  只有顺序变时，必须用 `insertBefore` 把**现有元素**挪到位，并只挪真正不在位的那几个。三条硬要求：
+  - **元素身份连续**：被按下的那颗胶囊的 DOM 节点要从按下一直活到松手。整行 `innerHTML` 重写会让
+    `drag.node` 变成游离节点，`onDragMove` 下一拍直接 return——真机后果是**一次拖动最多只能跨一格**，
+    抬起态 `dragging` 也随旧节点一起消失（"没有视觉反馈"的成因）。`patchNode()` 因此把 `dragging`
+    和 `shed` 一样列为**不得撤销**的类：前者属于指针，后者属于宽度阶梯。
+  - **让位必须看得见**：邻位胶囊用 WAAPI（Web Animations API）`animate()` 做 FLIP
+    （First-Last-Invert-Play：先记首位置，挪完再反向位移回去，然后放开）160ms 平滑滑开；被拖的那颗
+    不播放动画，改为抬起态（实线强调色描边 + 阴影 + `cursor:grabbing`）。
+    `prefers-reduced-motion` 下不播放，直接落位（P-8 末句：不得用 JS 动画绕过媒体查询——这里是"媒体查询
+    命中就完全不播"，不是绕过）。**不许**用内联 `style.transform` 实现：那会在每次轮询里留下属性写入，
+    与"空闲零变更"的既有不变式冲突。
+  - **松手必须结束**：`pointermove/pointerup/pointercancel` 挂在 `window`（外加 `setPointerCapture`），
+    因为释放点经常落在板面外（输入框、消息流、窗口外）。只听 `row` 内的 `pointerup` 会把拖动**悬空留着**，
+    此后光标不按键扫过板面就继续重排。另：`buttons === 0` 的 move 一律判定为"已松手"并收尾；
+    一次拖动跨过了胶囊就抑制紧随其后的那一次 `click`——`×` 悬浮按钮外探 5px 压在邻颗胶囊上，
+    否则"拖完顺手隐藏了一个指标"。
+  判定跨格用**每帧一次**（`requestAnimationFrame` 合流）且只对"想要的顺序确实不等于当前顺序"才提交，
+  空转的 move 不产生任何 DOM 写。回归用例：`check_widget.py` 的 `drag: one press crosses several chips
+  and keeps its own element`、`drag: the held chip is visibly lifted and neighbours slide into place`、
+  `drag: releasing outside the row ends it, and a bare hover never reorders`（三条都在旧构建上做过变红验证）。
+
 ## 7. 故障 × 防护 × 验证
 
 | 情况 | 防护 / 恢复 | 验证方式 |
@@ -250,7 +288,11 @@
 | 宿主正常启动（无端口） | 守护静默等待，不重启宿主 | `watchdog` 状态自述 + 锁文件 |
 | 端口文件消失 / 换端口 | 每轮重新读首行，端口变则重连 | `test_inject.py` 端口变化用例 |
 | 脚本早于 `.cc-composer` 执行 | 心跳重试挂载 | 预览页 `?late=1` 夹具 |
-| 宿主重渲染拆掉节点 | MutationObserver + 1 秒心跳重新锚定，保证全页一份 | `test_widget.py` |
+| 宿主重渲染拆掉节点 | MutationObserver + 1 秒心跳重新锚定；重挂前按 N-4 领养校验，只认自己建的节点 | `test_widget.py`、`check_widget.py` |
+| 上一任闭包没死，两个绘制者写同一行 | 接管一律先 `__goatDispose()`（含 `visibilitychange`），`render()` 只写 `state.node` | `painter: the row stays exactly the layout across every poll`（基线红） |
+| 拖动一次只能挪一格、没有反馈 | 顺序变化用 `insertBefore` 移动现有元素；`dragging` 列为不可撤销类；邻位 WAAPI 让位 | `drag: one press crosses several chips…`、`drag: the held chip is visibly lifted…`（基线红） |
+| 在板面外松手，之后光划过就重排 | `pointermove/up/cancel` 挂 `window` + `setPointerCapture`；`buttons===0` 即收尾 | `drag: releasing outside the row ends it…`（基线红） |
+| 脏 DOM 被固化成用户布局 | 提交前按可见集合校验（重复/缺项即作废），读存储去重 | `commit: a duplicated or missing metric…`、`storage: a duplicated order entry…` |
 | 候选 composer 多于一个 | 拒绝挂载，等下一轮（**待实现**，见 A-2） | 多节点 fixture |
 | 锚点存在但不可见 | 先按四条件过滤候选再判歧义（**待实现**，见 A-3） | 隐藏面板内的第二个 composer fixture |
 | 切换 thread 时旧响应晚到 | 代次 + 会话标识双校验才写状态；异常/`finally` 不改新会话（**待实现**，见 A-5） | 晚到响应、异常、卸载三个 fixture |
@@ -405,6 +447,52 @@
   真机 v17 回读：`layout=wrapped height=50 outside=-5 metrics=10+ctx idle=1`。
 - **教训（对应"删功能要审计它的守卫"）**：移除一个触发条件前，先问它还在顺手掩盖什么。
   这次它掩盖的是一个属性生命周期问题，代价是用户屏幕上 409px 的不可见内容。
+
+**编辑模式拖动：一次只挪一格、无反馈、退出后指标整颗消失（2026-10-13，`a25d782` `291184b`）**
+- **根因分析（两组缺陷叠加，不是一条）**：
+  1. **两个绘制者写同一行**。重入守卫只问"这个 id 的节点在不在"，于是宿主 React 摘掉节点之后的一次再注入
+     会**再起一个闭包**，而上一任的心跳/轮询/`visibilitychange` 还活着，两边都按 `getElementById` 找节点画。
+     真机留证（只读一次 `__goatProbe()`）：内存里 `layout.order` 干净、`hidden=[avg,requests]`，
+     屏上却是 `week` 两颗、`requests` 在板、`cache` 消失、状态点被指标覆盖，
+     且 `boardLog` **同一秒记到两种不同成员**（`t=1791865064` 两条）。
+     这正是 `blocked↔wrapped` 每秒翻转（"退出编辑后整条看不见，几秒后自己回来"）的成因：
+     谁后画谁定档位。
+  2. **拖动一跨格就整行重建**。`moveMetric → render → paint` 走 `row.innerHTML` 全写，
+     `drag.node` 变游离节点，`onDragMove` 下一拍 `parentElement` 为空直接 return ⇒ **一次拖动最多跨一格**；
+     `dragging` 抬起态随旧节点一起消失 ⇒ "没有视觉反馈"；`pointerup` 只听 `row` ⇒
+     板外松手后拖动**悬空**，此后不按键光划过板面仍会重排（夹具实测复现）。
+  3. **脏 DOM 会被固化成用户布局**：拖动结束用 `commitDomOrder()` 从 DOM 反读顺序，既不去重也不校验集合，
+     于是 (1) 造成的重复 `week` 被写进 `layout.order` 并挤掉 `cache`；`loadLayout()` 读存储同样不去重 ⇒ 永久。
+- **修复计划（对应条款 N-4 / L-5 / P-6 / P-11）**：闭包只画自己 `build()` 的节点（`state.node` 身份判定，
+  `render/refit/tick/mount` 全部按所有权拒绝领养）；接管一律先 `__goatDispose()`，dispose 补齐
+  `visibilitychange` 的撤销；纯重排改为 `insertBefore` 移动现有元素（`paint` 的 `movable` 分支），
+  `patchNode` 把 `dragging` 与 `shed` 同样列为不可撤销；邻位用 WAAPI 做 FLIP 让位、被拖者抬起描边+阴影，
+  `prefers-reduced-motion` 不播；`pointermove/up/cancel` 挂 `window` + `setPointerCapture`，
+  `buttons===0` 即收尾；跨格判定每帧合流且"顺序没变就不 render"；拖动跨过后 500ms 内的 `click` 作废
+  （`×` 外探 5px 压在邻颗上，否则拖完顺手隐藏一个指标）；提交与读存储都按可见集合校验/去重。
+  版本 17 → 18（`widget.js` 与 `inject.WIDGET_VERSION` 同步）。
+- **效果验证**：
+  - 真浏览器夹具 `tools/check_widget.py` **16/16**（新增 4 条：一次跨多格且元素身份保持、
+    抬起态+邻位动画、板外松手后光划过不再重排、再注入后跨轮询成员恒等于 layout）。
+    **红/绿对照**：同一工装跑 `35f08fb` 的 widget.js ⇒ 这 4 条**全部变红**（`same:false`、`animates:0`、
+    `held:null` 残留、`drift` 非空），不是空断言。
+  - 垫片 `tests/test_widget.py` **96 项全绿**（新增 4 条：存储去重 ×2、提交校验 ×2；基线上 4 条全红）。
+    顺带修正夹具自身：垫片把"二次注入"建成新 context，等于模拟了一次页面重载而非同页再注入，
+    改为复用同一 window 才走到接管分支。
+  - Python 全量 161 项：仅 `test_credentials.test_saved_session_survives_restart` 这一条**既有基线失败**
+    （本机存在真实 CC Switch key，与本轮无关）。
+  - 夹具截图：`goat-edit-mid-drag.png` 中 `月 0/7.20` 呈强调色实线描边 + 阴影，位于 `5h` 与 `周` 之间。
+  - **待做（不记为已跑通）**：真机生效需要**重启本机 gauge 服务**让新 `WIDGET_VERSION` 进内存——
+    现在跑着的进程仍带 17 的常量，而 `widget_source()` 每次从磁盘读 18 的源码，
+    这个组合会导致每轮 attach 都 dispose+重建（看板反复重挂）且 `__goatUpdate` 因版本不符而丢弃推送。
+    重启后按 N-4 只读回读 `__goatProbe()`：期望 `version=18`、`ownsNode=true`、
+    DOM 成员序列 === `metrics.order` 去掉 `metrics.hidden`、`.chip.dot` 恰好 1 颗、`boardLog` 不再出现
+    同一秒两种成员。**这一步需要用户点头或自行执行，绝不为验证重启 Command Code。**
+- **本轮总结**：用户报的三件事（拖动丢数据 / 退出后整颗不可见 / 无反馈不让位）里，前两件是
+  **同一个根因**（多绘制者 + 脏 DOM 固化），第三件是拖动自身的三个缺陷。修完最要紧的一条不变式：
+  **"全页一份"必须由"谁拥有这个节点"来判定，而不是"有没有这个 id"**——历史上同类假症状
+  （`gen 复活 / cache 重复 / rate 出现两次`）也是这一类，判据顺序仍是先问"谁还在写这个 DOM"。
+- **commit**：`a25d782`（产品码）、`291184b`（两套工装）、本条文档随附。回滚点 `35f08fb`。
 
 ## 10. 安装与卸载的边界
 
