@@ -29,6 +29,7 @@ from check_widget import (  # noqa: E402
     BROWSERS,
     launch_browser,
     page_target,
+    prune_stale_profiles,
     shutdown_browser,
     start_static_server,
 )
@@ -143,6 +144,9 @@ def main() -> int:
         print("no Edge or Chrome found")
         return 2
 
+    pruned = prune_stale_profiles()
+    if pruned:
+        print(f"pruned {pruned} stale harness profile(s)")
     server, port = start_static_server(Path(args.web) if args.web else ROOT / "app" / "web")
     profile = Path(tempfile.mkdtemp(prefix="goat-height-trace-"))
     process: subprocess.Popen | None = None

@@ -135,6 +135,54 @@ def shutdown_browser(
     print(f"WARN  harness profile survived cleanup: {profile}", file=sys.stderr)
 
 
+HARNESS_PREFIXES = ("goat-widget-harness-", "goat-height-trace-")
+STALE_AFTER_SECONDS = 6 * 3600
+
+
+def browser_holds_profile(profile: Path) -> bool:
+    """True while some browser still answers on the port this profile recorded."""
+    try:
+        head = (profile / "DevToolsActivePort").read_text(encoding="utf-8", errors="replace").splitlines()
+        port = int(head[0].strip())
+    except (OSError, ValueError, IndexError):
+        return False
+    import urllib.request
+
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/json/version", timeout=0.4) as response:
+            return "Browser" in json.loads(response.read().decode("utf-8", errors="replace"))
+    except Exception:  # noqa: BLE001 - nothing answering means the profile belongs to nobody again
+        return False
+
+
+def prune_stale_profiles() -> int:
+    """Delete this harness's own leftovers, so a hard kill cannot accumulate them.
+
+    A run stopped with SIGKILL never reaches its `finally`, and every abandoned
+    profile is hundreds of megabytes on disk plus a browser tree in memory. Only
+    our own prefixes are touched, only after STALE_AFTER_SECONDS without a write,
+    and only when nothing still serves the port recorded inside.
+    """
+    temp_root = Path(tempfile.gettempdir())
+    quiet_since = time.time() - STALE_AFTER_SECONDS
+    removed = 0
+    for candidate in sorted(temp_root.glob("goat-*")):
+        if not candidate.name.startswith(HARNESS_PREFIXES) or not candidate.is_dir():
+            continue
+        try:
+            if candidate.stat().st_mtime > quiet_since:
+                continue
+        except OSError:
+            continue
+        if browser_holds_profile(candidate):
+            continue
+        shutil.rmtree(candidate, ignore_errors=True)
+        if not candidate.exists():
+            removed += 1
+    return removed
+
+
 def page_target(port: int) -> dict:
     import urllib.request
 
@@ -509,6 +557,9 @@ def main() -> int:
     # (git show HEAD:app/web/widget.js), so a new assertion can be shown to fail
     # on the code it is meant to guard.
     web_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "app" / "web"
+    pruned = prune_stale_profiles()
+    if pruned:
+        print(f"pruned {pruned} stale harness profile(s)")
     server, port = start_static_server(web_root)
     profile = Path(tempfile.mkdtemp(prefix="goat-widget-harness-"))
     process: subprocess.Popen | None = None
