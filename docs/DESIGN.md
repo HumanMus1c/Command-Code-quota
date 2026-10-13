@@ -281,6 +281,16 @@
   and keeps its own element`、`drag: the held chip is visibly lifted and neighbours slide into place`、
   `drag: releasing outside the row ends it, and a bare hover never reorders`（三条都在旧构建上做过变红验证）。
 
+- **P-12 编辑态禁止文本选择，任何状态都不得出现文本光标（I-beam）**：拖动重排与"选中一串数字"在指针
+  手势上完全同形，浏览器一旦把按下-移动解释成选择，整块板面会被涂成选区色（真机截图实证）。
+  落点：`:host{cursor:default}`（I-beam 只在 `cursor:auto` 的文本框上出现，读数条全是文本框，
+  所以归一化放在宿主元素上继承，而不是逐颗胶囊补），`:host([data-edit="on"]) #row{user-select:none
+  -webkit-user-select:none}`。**退出编辑后必须恢复可选择**（复制数字是真需求），且此时选择文本仍只用箭头光标。
+  验证口径：合成 `PointerEvent` **触发不了原生选择**，所以"没有选区"这类断言若用派发事件来写就是空断言；
+  必须走 CDP `Input.dispatchMouseEvent`（浏览器自己的命中测试与选择机制）。夹具两条：
+  `drag: a real press-drag never selects the board's text in the editor`（v18 上实测选中文本 ⇒ 红）、
+  `reading: outside the editor the numbers stay selectable, with an arrow caret`（v18 `caret:auto` ⇒ 红）。
+
 ## 7. 故障 × 防护 × 验证
 
 | 情况 | 防护 / 恢复 | 验证方式 |
@@ -288,6 +298,7 @@
 | 宿主正常启动（无端口） | 守护静默等待，不重启宿主 | `watchdog` 状态自述 + 锁文件 |
 | 端口文件消失 / 换端口 | 每轮重新读首行，端口变则重连 | `test_inject.py` 端口变化用例 |
 | 脚本早于 `.cc-composer` 执行 | 心跳重试挂载 | 预览页 `?late=1` 夹具 |
+| 拖动被浏览器当成文本选择，整块板面涂成选区色 | 编辑态 `user-select:none`，`:host{cursor:default}` 归一光标（见 P-12） | 夹具两条真鼠标输入断言（CDP `Input.dispatchMouseEvent`，v18 上红） |
 | 宿主重渲染拆掉节点 | MutationObserver + 1 秒心跳重新锚定；重挂前按 N-4 领养校验，只认自己建的节点 | `test_widget.py`、`check_widget.py` |
 | 上一任闭包没死，两个绘制者写同一行 | 接管一律先 `__goatDispose()`（含 `visibilitychange`），`render()` 只写 `state.node` | `painter: the row stays exactly the layout across every poll`（基线红） |
 | 拖动一次只能挪一格、没有反馈 | 顺序变化用 `insertBefore` 移动现有元素；`dragging` 列为不可撤销类；邻位 WAAPI 让位 | `drag: one press crosses several chips…`、`drag: the held chip is visibly lifted…`（基线红） |
@@ -493,6 +504,28 @@
   **"全页一份"必须由"谁拥有这个节点"来判定，而不是"有没有这个 id"**——历史上同类假症状
   （`gen 复活 / cache 重复 / rate 出现两次`）也是这一类，判据顺序仍是先问"谁还在写这个 DOM"。
 - **commit**：`a25d782`（产品码）、`291184b`（两套工装）、本条文档随附。回滚点 `35f08fb`。
+
+**拖动把板面涂成选区色（2026-10-13 下午，`55e17d8` `570c765`）**
+- **根因**：按下-横移这一手势在浏览器看来既可能是拖动也可能是**选择文本**，而 `#row` 里全是文本框；
+  读数条此前从未声明 `user-select`/`cursor`，于是编辑模式每次跨格拖动都顺带产生原生选区
+  （用户截图：`Month/Burn/Cache/Ctx` 整片选区色）。
+- **修复**：`:host{cursor:default}`（I-beam 只在 `cursor:auto` 的文本框上出现，归一化放在继承根上，
+  一处覆盖全部胶囊与数字）；`:host([data-edit="on"]) #row{user-select:none;-webkit-user-select:none}`。
+  **正常模式不加限制**——退出编辑后仍可选中复制数字，只是光标是箭头。版本 18 → 19。
+- **效果验证（关键：换了工装才有证据）**：第一版断言用合成 `PointerEvent` 派发拖动，夹具里 `selected`
+  恒为空串 ⇒ **在 v18 上也"通过"**，是空断言；原生选择只认浏览器自己的输入管线。
+  改用 CDP `Input.dispatchMouseEvent`（mousePressed/mouseMoved/mouseReleased）后：
+  v18 **红**（实测选中 `消耗\n—\n×\n命中\n46.6%\n×\n吞吐\n—\n×\n`，与用户截图同形），
+  v19 **绿**（`select:none` + `selected:""`）；另一条 `reading: outside the editor…arrow caret`
+  同样 v18 红（`caret:auto`）/ v19 绿（`caret:default`，且整条仍可框选）。
+  夹具 **18/18**、垫片 **96/96**、Python 161 项仅 `test_credentials` 既有基线失败。
+  截图两张：编辑态拖动中（抬起描边+阴影、零选区）、正常模式刻意框选（整条被选中、箭头光标）。
+  顺带修掉夹具自身一个遮蔽性缺陷：`Harness.evaluate` 从 `result.exceptionDetails` 读异常，
+  而 CDP 把它放在 `result` 的**同级** ⇒ 页面抛错被静默成 `None`，本次就是它把一个语法错误
+  （CSS 模板串里写了反引号）伪装成"看板没挂载"。
+- **本轮总结**：手势歧义这类问题，**替身事件表达不了机制就必须换成真输入**；
+  一条断言若在修复前的构建上也能通过，它就不是断言。
+- **commit**：`55e17d8`（产品码 + 夹具异常读取修正）、`570c765`（真鼠标输入断言）。回滚点 `0b080b5`。
 
 ## 10. 安装与卸载的边界
 
