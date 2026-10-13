@@ -317,7 +317,7 @@
 | 宿主自动更新改了 DOM | 识别不了就不挂载，并留自述，不猜锚点 | 真机回归清单 |
 | 卸载 | `__goatDispose()` + `removeScriptToEvaluateOnNewDocument` + 删 Run 键 | dispose 前后宿主样式一致 |
 
-| 验证工装跑完留下 headless 浏览器（吃满内存与磁盘） | `shutdown_browser()`：CDP `Browser.close` → 等它自己退出 → 只在不退时 `taskkill /T /F` 杀整棵进程树 → 带重试删 profile；启动加 `--disable-session-crashed-bubble`/`--hide-crash-restore-bubble` 断掉崩溃自重启 | 修复前后各跑一次并计数：基线 `git archive` 副本 +1 profile/+7 进程，工作树 +0/+0（异常路径同验） |
+| 验证工装跑完留下 headless 浏览器（吃满内存与磁盘） | `shutdown_browser()`：CDP `Browser.close` → 等它自己退出 → 只在不退时 `taskkill /T /F` 杀整棵进程树 → 带重试删 profile；启动加 `--disable-session-crashed-bubble`/`--hide-crash-restore-bubble` 断掉崩溃自重启；`prune_stale_profiles()` 每次运行前清自家 6 小时无写入且端口无人应答的残留（SIGKILL 到不了 `finally`） | 修复前后各跑一次并计数：基线 `git archive` 副本 +1 profile/+7 进程，工作树 +0/+0（异常路径同验）；清扫后 C 盘回收 25.4GB |
 
 ## 8. 与上游 Antigrative Dashboard 的规范差异（不照抄清单）
 
@@ -567,12 +567,30 @@
   滑过去；判据是"跑一次之后计数是否 +1"，不是"代码里有没有 terminate"。其次，**症状的起始时间不等于成因**：
   登录时刻与内存事件重合，但 profile 的创建时间戳才是因果链上的证据，而 `--restore-last-session` 这类
   浏览器自己加的 flag 不能反推成"旧版本代码的实例"。
-- **遗留（未做，需用户点头）**：① `tests/test_watchdog.py` 9 处 `tempfile.mkdtemp(prefix="goat-*")`
-  只 `addCleanup(environment.stop)`、从不删目录 ⇒ Temp 里约 **1327 个空目录**（只占磁盘 368K，不占内存）；
-  ② 已漏的 **25GB / 58 个浏览器 profile 仍在** `%TEMP%`，未清扫；
-  ③ 开机自启按用户决定改为"只跟随 Command Code 启停、不再设计自启"，但 `install.ps1` 目前仍无条件写 Run 键，
-  完全去掉自启意味着登录后读数条不会自己回来——这一条需要单独定夺。
-- **commit**：`17e6f18`。回滚点 `0031774`。
+- **第二轮补做（2026-10-13 夜，用户批准 B/C/D）**：
+  - **B 测试自身的目录泄漏**（`7b82dbb`）：`tests/test_watchdog.py` 8 处 + `tests/test_launch_shortcut.py`
+    1 处 `tempfile.mkdtemp(prefix="goat-*")` 各补 `self.addCleanup(shutil.rmtree, 目录, True)`
+    （`addCleanup` 逐条测试即时回收，套件中途崩掉也不会漏剩下的）。
+    **验证**：全量 **161 项**跑完，`%TEMP%` 里 `goat-*` 目录 **1395→1395（零增长）**；
+    修之前同样跑一次是 **+28**。测试数与失败项不变（仍是 `test_credentials` 那一条既有基线失败）。
+  - **D 工装启动前扫旧守卫**（`eeee82b`）：`prune_stale_profiles()` 只处理自家两个前缀，条件是
+    "6 小时内没有写入"**且**"该 profile 记录的 `DevToolsActivePort` 端口已无人应答"（`browser_holds_profile()`
+    用 `/json/version` 探活，返回里必须有 `Browser` 字段才算活着）——这条探活正是"另一个运行还在跑"与
+    "被 SIGKILL 打死的残留"之间的判据，所以可以安全地放在启动路径上。两个工装 `main()` 各调一次。
+    **验证（六条，沙盒 Temp，不碰真残留）**：陈旧+端口死 ⇒ 删；陈旧但端口有人应答 ⇒ 留；目录年轻 ⇒ 留；
+    `goat-watchdog-*` 等别的前缀 ⇒ 不碰；散落的 `goat-*.json` ⇒ 不碰；上报的删除条数与实际一致。
+  - **C 一次性清扫已漏残留**：清扫前硬门槛——CIM 枚举 `msedge/chrome` 命令行，命中 harness 前缀的进程
+    必须为 **0** 才动手（非 0 直接 `ABORT` 并打印 PID）。实清 **58 个浏览器 profile + 1325 个测试目录**，
+    **回收 25448MB（约 25.4GB）**，C 盘可用从 ~70GB 涨到 95GB；清扫后 harness 进程 **0**、
+    `goat-*` 条目 1410→25（剩下的全是 `goat-*.json/.png/.txt` 报表工件与 `goat-red-*`/`goat-baseline-web`
+    这类基线副本，按授权范围**保留**）。
+  - **收尾复跑**：`check_widget.py` **18/18** 全绿，跑完 `goat-widget-harness-*`/`goat-height-trace-*`
+    目录 **0 个**、命令行命中 harness 前缀的浏览器进程 **0 个**。
+- **仍遗留（未拍板，别擅自动手）**：开机自启按用户决定应为"只跟随 Command Code 启停、不再设计自启"，
+  但 `install.ps1` 的 `Register-Autostart` 目前仍是**无条件**写 `HKCU\...\Run\GOATGaugeWatchdog`
+  （`--auto-launch` 才受开关控制）。完全去掉自启的代价是**登录后读数条不再自己回来**（要手动起），
+  而"真正随宿主起停"的挂载点（IFEO 一类）在 §10 已被明令禁止 ⇒ 这一条需要用户单独定夺。
+- **commit**：`17e6f18`（工装收尾）、`7b82dbb`（测试目录）、`eeee82b`（扫旧守卫）。回滚点 `0031774`。
 
 
 ## 10. 安装与卸载的边界
