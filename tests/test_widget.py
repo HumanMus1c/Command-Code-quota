@@ -294,6 +294,13 @@ class FakeObserver {
 }
 
 function run(env) {
+  if (env.reuse) {
+    // A re-injection into the SAME page: one window, one set of globals, one set
+    // of timers. Rebuilding the context would model a page reload instead, and the
+    // widget's single-painter rule is decided by what the shared window says.
+    vm.runInContext(source, env.reuse.context, { filename: "widget.js" });
+    return env.reuse;
+  }
   const timers = [];
   const win = {
     location: { origin: "https://app.commandcode.ai", protocol: "https:" },
@@ -348,7 +355,7 @@ function run(env) {
     const entry = timers.find((t) => t[0] === "interval");
     return entry ? entry[1]() : false;
   };
-  return { win, timers, fire, fireHeartbeat };
+  return { win, timers, fire, fireHeartbeat, context };
 }
 
 // The context chip is pulled from sessionStats, so a world that counts every metric
@@ -382,12 +389,18 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
     world.feed.children.map((c) => c.className || c.id).join(">"));
   check("mount: open shadow root with a row", Boolean(widget && widget.shadow && widget.shadow.getElementById("row")));
 
-  // ---- 2. a second injection must not duplicate ----
-  run({ doc: world.doc, electronAPI: { accountOverview: async () => OVERVIEW } });
+  // ---- 2. a second injection into the same page must not duplicate ----
+  // The real host gets `Runtime.evaluate` again on every reconcile, sharing one
+  // window; that is the case the single-painter rule has to hold on.
+  run({ reuse: first });
   let copies = 0;
   const walk = (node) => { for (const c of node.children) { if (c.id === "goat-gauge-widget") copies += 1; walk(c); } };
   walk(world.doc.documentElement);
   check("mount: exactly one copy", copies === 1, `found ${copies}`);
+  check("reinjection: the same row keeps serving, and no second heartbeat",
+    findById(world.doc.documentElement, "goat-gauge-widget") === widget &&
+      first.timers.filter((t) => t[0] === "interval").length === 1,
+    `intervals=${first.timers.filter((t) => t[0] === "interval").length}`);
 
   // ---- 3. the widget's own poll pulls host data ----
   check("poll: timer armed", await first.fire("timeout"));
@@ -908,6 +921,55 @@ const tick = () => new Promise((r) => setTimeout(r, 5));
   check("occlusion: a rectangle the bar is merely painted over keeps it visible",
     clearNode && clearNode.inert === false && clearNode.dataset.layout !== "blocked",
     clearNode && `${clearNode.dataset.layout}/${clearNode.inert}`);
+
+  // ---- a layout that was corrupted by another writer must not survive it ----
+  // The live board once showed the same metric twice with its neighbour gone: a
+  // foreign write put a duplicate in the row, the drag-end commit read the row
+  // back, and that became the user's saved layout. Both ends have to refuse it.
+  const poisonStore = fakeStorage();
+  poisonStore.setItem(
+    "goat-gauge-layout-v2",
+    JSON.stringify({
+      order: ["five", "week", "week", "month", "ctx", "burn", "cache", "rate", "requests", "tokens", "cost", "avg"],
+      hidden: ["cache", "cache"],
+    })
+  );
+  const healWorld = composerDoc("zh-Hans");
+  const heal = run({
+    doc: healWorld.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+    storage: poisonStore,
+  });
+  await heal.fire("timeout");
+  await tick();
+  const healed = heal.win.window.__goatLayout();
+  check("storage: a duplicated order entry is read once",
+    healed.order.length === 11 && new Set(healed.order).size === 11, healed.order.join(","));
+  check("storage: a duplicated hidden entry is read once",
+    healed.hidden.join(",") === "cache", healed.hidden.join(","));
+
+  const commitWorld = composerDoc("zh-Hans");
+  const commitRun = run({
+    doc: commitWorld.doc,
+    electronAPI: { accountOverview: async () => ({ success: true, overview: OVERVIEW }) },
+  });
+  await commitRun.fire("timeout");
+  await tick();
+  const beforeCommit = commitRun.win.window.__goatLayout().order.join(",");
+  // A row holding week twice and no month: somebody else's write, not a request.
+  commitRun.win.window.__goatLayout("commit",
+    ["five", "week", "week", "ctx", "burn", "cache", "rate", "requests", "tokens", "cost", "avg"]);
+  await tick();
+  check("commit: a duplicated or missing metric in the row is never baked in",
+    commitRun.win.window.__goatLayout().order.join(",") === beforeCommit,
+    commitRun.win.window.__goatLayout().order.join(","));
+  commitRun.win.window.__goatLayout("commit",
+    ["avg", "cost", "tokens", "requests", "rate", "cache", "burn", "ctx", "month", "week", "five"]);
+  await tick();
+  check("commit: a genuine full reorder is still accepted",
+    commitRun.win.window.__goatLayout().order.join(",") ===
+      "avg,cost,tokens,requests,rate,cache,burn,ctx,month,week,five",
+    commitRun.win.window.__goatLayout().order.join(","));
 
   const failed = results.filter((r) => !r.ok);
   for (const r of results) {

@@ -305,6 +305,99 @@ MOVE_ONE = """
 })()
 """
 
+# The editor is driven with real PointerEvents, because every previous harness
+# called the layout API directly and so never touched the path that broke: the
+# chip under the pointer, the release outside the board, the neighbours' movement.
+DRIVE = """
+(() => {
+  const node = document.getElementById('goat-gauge-widget');
+  const row = node.shadowRoot.getElementById('row');
+  window.__fires = [];
+  window.__animateCalls = 0;
+  if (!Element.prototype.__goatAnimateProbe) {
+    const original = Element.prototype.animate;
+    Element.prototype.animate = function (...args) {
+      window.__animateCalls += 1;
+      return original.apply(this, args);
+    };
+    Element.prototype.__goatAnimateProbe = true;
+  }
+  window.__drag = {
+    tag(id) {
+      const chip = row.querySelector('[data-metric="' + id + '"]');
+      if (chip) chip.__moved = 1;
+      return Boolean(chip);
+    },
+    center(id) {
+      const chip = row.querySelector('[data-metric="' + id + '"]');
+      if (!chip) return null;
+      const box = chip.getBoundingClientRect();
+      return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+    },
+    // The leading edge, not the centre: a pointer parked on a chip's middle sits
+    // past its midpoint, so "drag onto the first chip" legitimately lands second.
+    left(id) {
+      const chip = row.querySelector('[data-metric="' + id + '"]');
+      if (!chip) return null;
+      const box = chip.getBoundingClientRect();
+      return [Math.round(box.left + 2), Math.round(box.top + box.height / 2)];
+    },
+    fire(type, x, y, buttons) {
+      const el = node.shadowRoot.elementFromPoint(x, y) || row;
+      el.dispatchEvent(new PointerEvent(type, {
+        bubbles: true, cancelable: true, composed: true, clientX: x, clientY: y,
+        button: 0, buttons, pointerId: 42, isPrimary: true, pointerType: 'mouse',
+      }));
+      window.__fires.push(type + ':' + (el.dataset.metric || el.className || el.nodeName));
+      return el.dataset.metric || el.nodeName;
+    },
+    snap() {
+      const chips = [...row.querySelectorAll('.chip[data-metric]')];
+      const held = row.querySelector('.chip.dragging');
+      return JSON.stringify({
+        order: chips.map((c) => c.dataset.metric).join('+'),
+        held: held ? held.dataset.metric : null,
+        // The element the drag started on, still the one on the board?
+        same: Boolean(chips.find((c) => c.__moved === 1)),
+        cursor: held ? getComputedStyle(held).cursor : null,
+        lifted: held ? getComputedStyle(held).boxShadow !== 'none' : false,
+        animates: window.__animateCalls,
+        fires: window.__fires.slice(-3),
+      });
+    },
+  };
+  return 'ready';
+})()
+"""
+
+# A host re-render that drops our subtree, with no dispose: the case that used to
+# leave a second closure polling and painting into the replacement row.
+REINJECT = """
+(async () => {
+  const src = await (await fetch('/widget.js')).text();
+  document.getElementById('goat-gauge-widget').remove();
+  (0, eval)(src);
+  return document.querySelectorAll('#goat-gauge-widget').length;
+})()
+"""
+
+# What the board must always equal: the ids the layout renders, in that order.
+MEMBERSHIP = """
+JSON.stringify((() => {
+  const node = document.getElementById('goat-gauge-widget');
+  const row = node.shadowRoot.getElementById('row');
+  const probe = window.__goatProbe();
+  const kept = probe.metrics.order.filter((id) => probe.metrics.hidden.indexOf(id) < 0);
+  const drawn = [...row.querySelectorAll('.chip[data-metric]')].map((c) => c.dataset.metric);
+  return { kept, drawn, dots: row.querySelectorAll('.chip.dot').length };
+})())
+"""
+
+
+def point(value) -> list:
+    """Runtime.evaluate returns arrays natively, strings as strings."""
+    return value if isinstance(value, list) else json.loads(value)
+
 
 def main() -> int:
     executable = next((path for path in BROWSERS if Path(path).exists()), None)
@@ -462,6 +555,111 @@ def main() -> int:
             "exit editor: the row is back on a tier and paints nothing outside its box",
             after_edit.get("tiers") is True and after_edit.get("outside", 99) <= 1,
             json.dumps(after_edit),
+        ))
+
+        # ---- the drag, driven with real pointer events ----
+        harness.evaluate("window.__goatLayout('edit')")
+        time.sleep(0.5)
+        harness.evaluate(DRIVE)
+        start = json.loads(harness.evaluate("window.__drag.snap()"))
+        order0 = str(start.get("order", "")).split("+")
+        harness.evaluate("window.__drag.tag('ctx')")
+        origin = point(harness.evaluate("window.__drag.center('ctx')"))
+        target = point(harness.evaluate("window.__drag.left('five')"))
+        ox, oy = origin
+        harness.evaluate(f"window.__drag.fire('pointerdown', {ox}, {oy}, 1)")
+        for step in range(1, 9):
+            x = round(ox + (target[0] - ox) * step / 8)
+            harness.evaluate(f"window.__drag.fire('pointermove', {x}, {oy}, 1)")
+            time.sleep(0.1)
+        held = json.loads(harness.evaluate("window.__drag.snap()"))
+        order1 = str(held.get("order", "")).split("+")
+        results.append((
+            "drag: one press crosses several chips and keeps its own element",
+            held.get("same") is True
+            and len(order1) == len(order0)
+            and len(set(order1)) == len(order1)
+            and order1.index("ctx") <= order0.index("ctx") - 3,
+            json.dumps({k: held.get(k) for k in ("same", "held", "animates")})
+            + " " + "+".join(order1),
+        ))
+        results.append((
+            "drag: the held chip is visibly lifted and neighbours slide into place",
+            held.get("held") == "ctx"
+            and held.get("cursor") == "grabbing"
+            and held.get("lifted") is True
+            and held.get("animates", 0) > 0,
+            json.dumps({k: held.get(k) for k in ("held", "cursor", "lifted", "animates")}),
+        ))
+        harness.evaluate(f"window.__drag.fire('pointerup', {target[0]}, {oy}, 0)")
+        time.sleep(0.3)
+
+        # A release outside the board must end the drag: it used to stay armed, and
+        # the board then rearranged itself under a pointer that held nothing. So the
+        # first move must NOT cross a chip - a crossing rebuilt the row and hid the
+        # leak behind a dead node reference.
+        second = point(harness.evaluate("window.__drag.center('avg')"))
+        harness.evaluate(f"window.__drag.fire('pointerdown', {second[0]}, {second[1]}, 1)")
+        harness.evaluate(f"window.__drag.fire('pointermove', {second[0] - 8}, {second[1]}, 1)")
+        time.sleep(0.2)
+        armed = json.loads(harness.evaluate("window.__drag.snap()"))
+        harness.evaluate(
+            "document.querySelector('textarea').dispatchEvent(new PointerEvent('pointerup',"
+            f"{{bubbles:true, composed:true, clientX:{second[0] - 8}, clientY:{second[1]},"
+            "buttons:0, pointerId:42}))"
+            "||'released'"
+        )
+        released = json.loads(harness.evaluate("window.__drag.snap()"))
+        for step in range(1, 6):
+            harness.evaluate(
+                f"window.__drag.fire('pointermove', {second[0] - 8 - 30 * step}, {second[1]}, 0)"
+            )
+            time.sleep(0.1)
+        hovered = json.loads(harness.evaluate("window.__drag.snap()"))
+        results.append((
+            "drag: releasing outside the row ends it, and a bare hover never reorders",
+            armed.get("held") == "avg"
+            and released.get("held") is None
+            and hovered.get("held") is None
+            and hovered.get("order") == released.get("order"),
+            json.dumps({"armed": armed.get("held"), "after": released.get("held"),
+                        "hover": hovered.get("held")})
+            + f" {released.get('order')} -> {hovered.get('order')}",
+        ))
+        harness.evaluate("window.__goatLayout('save')")
+        time.sleep(0.6)
+
+        # ---- one painter per row ----
+        # The host's React dropping our subtree is the trigger: with no dispose, a
+        # second closure used to mount alongside the first, and each painted the
+        # board it remembered into whichever node answered to the id - duplicates,
+        # a hidden metric back on screen, the status dot eaten by a chip. One sample
+        # can catch either painter, so membership is watched across a poll.
+        copies = harness.evaluate(REINJECT, await_promise=True)
+        time.sleep(1.0)
+        harness.evaluate("window.__goatLayout('edit')")
+        harness.evaluate("window.__goatLayout('hide', 'cache')")
+        harness.evaluate("window.__goatLayout('save')")
+        samples = [json.loads(harness.evaluate(MEMBERSHIP))]
+        # Any surviving closure still has a resize listener that renders on demand,
+        # so waking the window is what proves there is only one painter: the stale
+        # one repaints the board it remembers (cache back, the dot overwritten).
+        harness.evaluate(
+            "Object.defineProperty(document,'hidden',{configurable:true,get:() => false});"
+            "document.dispatchEvent(new Event('visibilitychange'));"
+            "window.dispatchEvent(new Event('resize'));"
+        )
+        for _ in range(3):
+            time.sleep(0.6)
+            harness.evaluate("window.dispatchEvent(new Event('resize'))")
+            samples.append(json.loads(harness.evaluate(MEMBERSHIP)))
+        drift = [s.get("drawn") for s in samples if s.get("kept") != s.get("drawn") or s.get("dots") != 1]
+        member = samples[-1]
+        results.append((
+            "painter: the row stays exactly the layout across every poll",
+            copies == 1 and not drift,
+            f"copies={copies} drift={json.dumps(drift, ensure_ascii=False)} last="
+            + json.dumps(member, ensure_ascii=False),
         ))
 
         connection.close()
