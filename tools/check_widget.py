@@ -115,10 +115,16 @@ class Harness:
                 "returnByValue": True,
                 "awaitPromise": await_promise,
             },
-        )
-        result = (reply or {}).get("result", {})
-        if result.get("exceptionDetails"):
-            raise RuntimeError(f"page threw: {result['exceptionDetails']}")
+        ) or {}
+        # `exceptionDetails` is a sibling of `result`, not a field inside it: read
+        # the wrong level and a throwing page expression comes back as a silent
+        # None, which every caller then misreads as "the board is empty".
+        details = reply.get("exceptionDetails") or (reply.get("result") or {}).get("exceptionDetails")
+        if details:
+            raise RuntimeError(f"page threw: {details}")
+        result = reply.get("result", {})
+        if (result.get("subtype") or "") == "error":
+            raise RuntimeError(f"page threw: {result.get('className')} {result.get('description')}")
         return result.get("value")
 
 
@@ -354,6 +360,11 @@ DRIVE = """
     snap() {
       const chips = [...row.querySelectorAll('.chip[data-metric]')];
       const held = row.querySelector('.chip.dragging');
+      // A selection inside an open shadow root is not reliably visible to the
+      // document's own Selection, so ask the shadow root directly.
+      const inside = typeof node.shadowRoot.getSelection === 'function'
+        ? node.shadowRoot.getSelection()
+        : window.getSelection();
       return JSON.stringify({
         order: chips.map((c) => c.dataset.metric).join('+'),
         held: held ? held.dataset.metric : null,
@@ -363,6 +374,9 @@ DRIVE = """
         lifted: held ? getComputedStyle(held).boxShadow !== 'none' : false,
         animates: window.__animateCalls,
         fires: window.__fires.slice(-3),
+        select: getComputedStyle(row).userSelect || getComputedStyle(row).webkitUserSelect,
+        caret: getComputedStyle(chips[0] || row).cursor,
+        selected: inside ? String(inside) : '',
       });
     },
   };
@@ -397,6 +411,37 @@ JSON.stringify((() => {
 def point(value) -> list:
     """Runtime.evaluate returns arrays natively, strings as strings."""
     return value if isinstance(value, list) else json.loads(value)
+
+
+def drag_with_mouse(connection: CdpConnection, start: list, end: list, steps: int = 6) -> None:
+    """Press-drag through CDP Input, i.e. the browser's own hit testing, selection
+    and pointer-event generation.
+
+    A dispatched PointerEvent never starts a text selection, so an assertion about
+    selection written with synthetic events passes without testing anything.
+    """
+    x0, y0 = start
+    x1, y1 = end
+    connection.call(
+        "Input.dispatchMouseEvent",
+        {"type": "mousePressed", "x": x0, "y": y0, "button": "left", "clickCount": 1, "buttons": 1},
+    )
+    for step in range(1, steps + 1):
+        connection.call(
+            "Input.dispatchMouseEvent",
+            {
+                "type": "mouseMoved",
+                "x": round(x0 + (x1 - x0) * step / steps),
+                "y": round(y0 + (y1 - y0) * step / steps),
+                "button": "left",
+                "buttons": 1,
+            },
+        )
+        time.sleep(0.05)
+    connection.call(
+        "Input.dispatchMouseEvent",
+        {"type": "mouseReleased", "x": x1, "y": y1, "button": "left", "clickCount": 1, "buttons": 0},
+    )
 
 
 def main() -> int:
@@ -591,6 +636,18 @@ def main() -> int:
             and held.get("animates", 0) > 0,
             json.dumps({k: held.get(k) for k in ("held", "cursor", "lifted", "animates")}),
         ))
+        # Real input this time: the complaint was the board painting itself purple
+        # mid-drag, and only the browser's own selection machinery can produce it.
+        press = point(harness.evaluate("window.__drag.center('tokens')"))
+        drop = point(harness.evaluate("window.__drag.center('rate')"))
+        drag_with_mouse(harness.connection, press, drop)
+        time.sleep(0.4)
+        dragged = json.loads(harness.evaluate("window.__drag.snap()"))
+        results.append((
+            "drag: a real press-drag never selects the board's text in the editor",
+            dragged.get("select") == "none" and not str(dragged.get("selected", "")).strip(),
+            json.dumps({k: dragged.get(k) for k in ("select", "selected")}),
+        ))
         harness.evaluate(f"window.__drag.fire('pointerup', {target[0]}, {oy}, 0)")
         time.sleep(0.3)
 
@@ -628,6 +685,12 @@ def main() -> int:
         ))
         harness.evaluate("window.__goatLayout('save')")
         time.sleep(0.6)
+        calm = json.loads(harness.evaluate("window.__drag.snap()"))
+        results.append((
+            "reading: outside the editor the numbers stay selectable, with an arrow caret",
+            calm.get("select") != "none" and calm.get("caret") == "default",
+            json.dumps({k: calm.get(k) for k in ("select", "caret")}),
+        ))
 
         # ---- one painter per row ----
         # The host's React dropping our subtree is the trigger: with no dispose, a
