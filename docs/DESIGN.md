@@ -317,6 +317,8 @@
 | 宿主自动更新改了 DOM | 识别不了就不挂载，并留自述，不猜锚点 | 真机回归清单 |
 | 卸载 | `__goatDispose()` + `removeScriptToEvaluateOnNewDocument` + 删 Run 键 | dispose 前后宿主样式一致 |
 
+| 验证工装跑完留下 headless 浏览器（吃满内存与磁盘） | `shutdown_browser()`：CDP `Browser.close` → 等它自己退出 → 只在不退时 `taskkill /T /F` 杀整棵进程树 → 带重试删 profile；启动加 `--disable-session-crashed-bubble`/`--hide-crash-restore-bubble` 断掉崩溃自重启 | 修复前后各跑一次并计数：基线 `git archive` 副本 +1 profile/+7 进程，工作树 +0/+0（异常路径同验） |
+
 ## 8. 与上游 Antigrative Dashboard 的规范差异（不照抄清单）
 
 | 上游规范 | 我们是否照抄 | 原因 |
@@ -526,6 +528,52 @@
 - **本轮总结**：手势歧义这类问题，**替身事件表达不了机制就必须换成真输入**；
   一条断言若在修复前的构建上也能通过，它就不是断言。
 - **commit**：`55e17d8`（产品码 + 夹具异常读取修正）、`570c765`（真鼠标输入断言）。回滚点 `0b080b5`。
+
+**验证工装泄漏 headless 浏览器，把机器吃干（2026-10-13 夜，`17e6f18`）**
+- **根因分析（四件事叠成一条死亡螺旋，第 1 条才是主因）**：
+  1. **句柄被丢弃，收尾语句是死代码**。`tools/check_widget.py` 的 `launch_browser()` 只返回端口号，
+     `Popen` 对象在函数里就地蒸发；而 `main()` 写的是 `process = None` + `finally: if process is not None:
+     process.terminate()` ⇒ **那行永远不会执行**。`tools/trace_height.py` 复用同一函数，`finally` 里
+     连 terminate 都没有，只关静态服务器。**每跑一次 = 泄漏一整个浏览器**。
+  2. **只杀根进程也不够**。477 个 Edge 进程 / 61 个浏览器 ≈ 7.8，正是"根进程 + 渲染器 + utility +
+     crashpad"的规模；`terminate()` 即便生效也只收根进程，其余被重新收养后继续占内存。
+  3. **持久 profile 会让泄漏自乘**。`git log -S'restore-last-session' --all` 与 `-S'"--restart"' --all`
+     **均无命中** ⇒ 用户看到的这两个标志不是本仓库任何版本写过的，而是 **Chromium 自身的崩溃后自重启**
+     机制加上去的：内存压力 ⇒ 浏览器崩 ⇒ 带旧 profile 自重启 ⇒ 更缺内存 ⇒ 重启更勤。
+  4. **profile 从不删**：58 个残留目录共 **25GB**，单个最大 490MB（Edge 把缓存写进临时 profile）。
+- **归因修正（这条链原先被记在开机自启头上，实测不成立）**：`install.ps1` 确实**无条件**写
+  `HKCU\...\Run\GOATGaugeWatchdog`（`--serve --inject`，`--auto-launch` 才是要开关），但它拉起的运行时路径
+  **创建不了 headless Edge**：`tools/` 从不被 `app/`、`entry.py` 导入；`app/watchdog.py` 里浏览器引用 0 处
+  （它只负责带调试端口拉起 Command Code 宿主）；重启登录那一刻（10-12 22:4x）**新建 `goat-*` 目录 = 0 个**。
+  浏览器 profile 的创建批次落在 10-13 02:01/02:03 与 12:51–14:16，对应的是**开发会话里反复跑这两个工装**。
+  即：自启与本次内存事件无因果关系，泄漏源是工装自身。（现场该 Run 值已不存在，即已被 `uninstall.ps1`
+  或手动删除——这就是"止血"实际止掉的东西，而工装漏点当时仍在。）
+- **修复计划**：`launch_browser()` 改返回 `(端口, Popen)`，并新增 `shutdown_browser(连接, 进程, profile)`：
+  先发 CDP（Chrome DevTools Protocol，浏览器远程调试协议）`Browser.close` 让浏览器自己收整棵树，
+  `wait(8s)`，超时才 `taskkill /T /F /PID` 兜底，然后带重试删 profile（Windows 上句柄释放有延迟），
+  删不掉就打 `WARN` 到 stderr 而不是静默；`launch_browser()` 自己的失败路径（等不到 `DevToolsActivePort`）
+  也先收尾再抛——否则一次失败启动就是一个孤儿。启动参数补
+  `--disable-session-crashed-bubble` + `--hide-crash-restore-bubble` 断掉第 3 条。`trace_height.py` 同步。
+- **效果验证（红绿对照，数字可复现）**：
+  - **红**：`git archive HEAD` 导出修复前副本跑一次 ⇒ profile 目录 1396→1397、
+    `harness_processes` **0→7**、带 `DevToolsActivePort` 的 profile 61→62。与用户看到的 61/477 同形。
+  - **绿**：工作树跑 `check_widget.py` ⇒ 18/18 断言全绿，目录 47→47、`harness_processes` 恒为 0；
+    `trace_height.py --seconds 4 --width 700` ⇒ 同样 +0/+0。
+  - **异常路径**：`check_widget.py tools`（缺 `widget-preview.html`，中途 `TypeError` 抛出）⇒
+    收尾照样跑完，`harness_processes=0`、目录 1395→1395。
+  - Python 全量 **161 项**：仅 `test_credentials.test_saved_session_survives_restart` 这一条既有基线失败
+    （本机存在真实 CC Switch key，与本轮无关）。实验留下的孤儿与基线副本已按同一 PID 判据清回 1395/61/0。
+- **本轮总结**：**"有 finally"不等于"资源被回收"**——`finally` 里引用的变量从未被赋值，静态读代码时最容易
+  滑过去；判据是"跑一次之后计数是否 +1"，不是"代码里有没有 terminate"。其次，**症状的起始时间不等于成因**：
+  登录时刻与内存事件重合，但 profile 的创建时间戳才是因果链上的证据，而 `--restore-last-session` 这类
+  浏览器自己加的 flag 不能反推成"旧版本代码的实例"。
+- **遗留（未做，需用户点头）**：① `tests/test_watchdog.py` 9 处 `tempfile.mkdtemp(prefix="goat-*")`
+  只 `addCleanup(environment.stop)`、从不删目录 ⇒ Temp 里约 **1327 个空目录**（只占磁盘 368K，不占内存）；
+  ② 已漏的 **25GB / 58 个浏览器 profile 仍在** `%TEMP%`，未清扫；
+  ③ 开机自启按用户决定改为"只跟随 Command Code 启停、不再设计自启"，但 `install.ps1` 目前仍无条件写 Run 键，
+  完全去掉自启意味着登录后读数条不会自己回来——这一条需要单独定夺。
+- **commit**：`17e6f18`。回滚点 `0031774`。
+
 
 ## 10. 安装与卸载的边界
 
