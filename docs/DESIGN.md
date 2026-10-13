@@ -295,6 +295,7 @@
 
 | 情况 | 防护 / 恢复 | 验证方式 |
 | --- | --- | --- |
+| 同一 profile 被反复起浏览器（每次点"登录"一个进程，无人回收） | `open_chrome()` 起前先探 `_cdp_alive()`：热 profile 那次只是移交 URL 的临时启动器，`wait(10s)` 收掉；真成了实例或移交不动才把句柄交回调用方 | `test_chrome_mode.OpenChromeLifecycleTestCase` 四条；红/绿：同一批用例跑 `git archive` 基线 ⇒ 回收那条**红** |
 | 宿主正常启动（无端口） | 守护静默等待，不重启宿主 | `watchdog` 状态自述 + 锁文件 |
 | 端口文件消失 / 换端口 | 每轮重新读首行，端口变则重连 | `test_inject.py` 端口变化用例 |
 | 脚本早于 `.cc-composer` 执行 | 心跳重试挂载 | 预览页 `?late=1` 夹具 |
@@ -589,6 +590,21 @@
     这类基线副本，按授权范围**保留**）。
   - **收尾复跑**：`check_widget.py` **18/18** 全绿，跑完 `goat-widget-harness-*`/`goat-height-trace-*`
     目录 **0 个**、命令行命中 harness 前缀的浏览器进程 **0 个**。
+  - **第三轮：全仓"起点 → 回收者"审计（`1172e7f` `1330b24`）**。把 `Thread(`/`.start()`/`Popen(`/`mkdtemp`
+    全部列出逐条对号，结论：**10 个起点里 9 个已有回收者或去重**——HTTP 线程 `stop_server()`
+    （shutdown + server_close + join 2s）、后台循环 `start_background()` 的 `is_alive` 早退、单次刷新线程
+    的 `_refreshing` 标志、注入循环的 `claim_inject_lock` + `serve(stop_event)`、两个 daemon 线程共用
+    `stop_event`、`_open_login_if_needed` 有 8 秒 deadline 自终止、工装静态服务器在 `finally` 里关。
+    唯一"起了不管"的是 `chrome_mode.open_chrome()`：**句柄被三处调用全部丢弃**，与本次泄漏同形。
+    修法走**去重优先于回收**且**不改行为**（同一个 `--user-data-dir`、同一个 `--app`，否则会话会被劈成两半）：
+    热 profile 下第二个进程只负责把 URL 交给已有实例随即退出 ⇒ 就地 `wait(10s)` 收掉；冷启动或移交不动
+    ⇒ 把句柄交回调用方，保证任何一支都有所有者。宿主窗口在 `finally` 里**故意不 terminate**（那是用户自己的
+    浏览器，退出 gauge 不该关掉他的会话），这一条已写成注释防止后人"顺手修好"。
+    **验证**：168 项仅那条既有基线失败；跑前/跑后命令行命中 `goat-|chrome-profile` 的浏览器进程 **0→0**、
+    `goat-*` 目录 **10→10**。红/绿：同一批新用例打在 `git archive HEAD` 基线上 ⇒ 回收那条变红
+    （`Mock is not None`），另三条在旧码上本就成立——**只有新契约变红，才说明断言测的是这次改动**。
+    ⚠ **未实测项（诚实标注）**：Chromium"共享 profile 时第二次启动会移交给已有实例"是通用行为，
+    我**没有**在你机器上真起过窗口验证（那会打扰你）；本修法不依赖它成立——移交失败那一支仍把句柄交回调用方。
 - **登录自启同日撤除（`e2db3d9` `2d3894e`）**：用户定调"只跟随 Command Code 启停"，于是 Run 键注册与
   `tools/make-shortcut.ps1 -Startup` 两处一起删掉，`uninstall.ps1` 保留 Run 键清除并**补上「启动」条目
   的清除路径**（删功能必须给它留下的东西一条退路），两者都先核对指向、同名别处的原样保留。
