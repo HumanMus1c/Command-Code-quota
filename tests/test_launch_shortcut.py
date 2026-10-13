@@ -62,7 +62,9 @@ class MergeTests(unittest.TestCase):
 
 class InspectTests(unittest.TestCase):
     def test_absent_shortcut_is_reported_not_guessed(self) -> None:
-        report = launch_shortcut.inspect(Path(tempfile.mkdtemp(prefix="goat-none-")) / "Command Code.lnk",
+        directory = Path(tempfile.mkdtemp(prefix="goat-none-"))
+        self.addCleanup(shutil.rmtree, directory, True)
+        report = launch_shortcut.inspect(directory / "Command Code.lnk",
                                          capture=lambda argv: "")
         self.assertEqual(report["state"], "absent")
 

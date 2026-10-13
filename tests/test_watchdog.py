@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import io
 import os
+import shutil
 import sys
 from pathlib import Path
 import tempfile
@@ -88,6 +89,7 @@ class OwnershipTests(unittest.TestCase):
 class RuntimeDirTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="goat-watchdog-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
         self.environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -131,6 +133,7 @@ class RuntimeDirTests(unittest.TestCase):
 class InjectLockTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="goat-injectlock-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
         environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
         environment.start()
         self.addCleanup(environment.stop)
@@ -148,6 +151,7 @@ class InjectLockTests(unittest.TestCase):
 class InjectModeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="goat-injectmode-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
         environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
         environment.start()
         self.addCleanup(environment.stop)
@@ -184,6 +188,7 @@ class FakeInjector:
 class FollowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="goat-follow-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
         self.environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -306,6 +311,7 @@ class FollowTests(unittest.TestCase):
 class LaunchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.profile = Path(tempfile.mkdtemp(prefix="goat-profile-"))
+        self.addCleanup(shutil.rmtree, self.profile, True)
 
     def test_running_without_a_port_refuses_to_restart_the_session(self) -> None:
         spawned = []
@@ -342,10 +348,12 @@ class LaunchTests(unittest.TestCase):
 class ProbeTests(unittest.TestCase):
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="goat-probe-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
         self.environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
         self.environment.start()
         self.addCleanup(self.environment.stop)
         self.profile = Path(tempfile.mkdtemp(prefix="goat-probe-profile-"))
+        self.addCleanup(shutil.rmtree, self.profile, True)
 
     def test_only_shapes_and_a_hash_are_written(self) -> None:
         value = {
@@ -438,6 +446,7 @@ class StartupLaunchTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.dir = Path(tempfile.mkdtemp(prefix="goat-launch-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
         self.environment = mock.patch.dict(os.environ, {"GOATGAUGE_DATA": str(self.dir)})
         self.environment.start()
         self.addCleanup(self.environment.stop)
