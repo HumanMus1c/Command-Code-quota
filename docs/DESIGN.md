@@ -421,6 +421,8 @@
   ③ 面板对齐 仍未开始。
 
 **登录自启动此前从未生效（2026-10-12，`d515db5`）**
+〔**该注册已于 2026-10-13 整体撤除**（§10 A-9）：读数条只跟随 Command Code 启停。下面记的是当时那条
+`--watch`/`--follow` 不匹配的教训——**跨文件的标志名翻译必须有把两侧串起来的测试**，这个结论仍然有效。〕
 `install.ps1` 写进 HKCU Run 键的是 `entry.py --watch`，而 `entry.py` 把这个名字**原样转发**给守护进程；
 守护进程自己的循环叫 `--follow`，argparse 直接拒收 ⇒ 开机自启动在第一次轮询之前就死掉，
 且因 `pythonw` 无控制台而**零可见症状**。其它模式标志（`--status/--launch/--probe`）都做了名称翻译，
@@ -541,10 +543,11 @@
      **均无命中** ⇒ 用户看到的这两个标志不是本仓库任何版本写过的，而是 **Chromium 自身的崩溃后自重启**
      机制加上去的：内存压力 ⇒ 浏览器崩 ⇒ 带旧 profile 自重启 ⇒ 更缺内存 ⇒ 重启更勤。
   4. **profile 从不删**：58 个残留目录共 **25GB**，单个最大 490MB（Edge 把缓存写进临时 profile）。
-- **归因修正（这条链原先被记在开机自启头上，实测不成立）**：`install.ps1` 确实**无条件**写
-  `HKCU\...\Run\GOATGaugeWatchdog`（`--serve --inject`，`--auto-launch` 才是要开关），但它拉起的运行时路径
-  **创建不了 headless Edge**：`tools/` 从不被 `app/`、`entry.py` 导入；`app/watchdog.py` 里浏览器引用 0 处
-  （它只负责带调试端口拉起 Command Code 宿主）；重启登录那一刻（10-12 22:4x）**新建 `goat-*` 目录 = 0 个**。
+- **归因修正（这条链原先被记在开机自启头上，实测不成立）**：`install.ps1` 当时确实默认写
+  `HKCU\...\Run\GOATGaugeWatchdog`（值为 `entry.py --serve --inject`，可用 `-NoAutostart` 跳过，
+  `--auto-launch` 才是要开关），但它拉起的运行时路径**创建不了 headless Edge**：`tools/` 从不被 `app/`、
+  `entry.py` 导入；`app/watchdog.py` 里浏览器引用 0 处（它只负责带调试端口拉起 Command Code 宿主）。
+  重启登录那一刻（10-12 22:4x）**新建 `goat-*` 目录 = 0 个**。
   浏览器 profile 的创建批次落在 10-13 02:01/02:03 与 12:51–14:16，对应的是**开发会话里反复跑这两个工装**。
   即：自启与本次内存事件无因果关系，泄漏源是工装自身。（现场该 Run 值已不存在，即已被 `uninstall.ps1`
   或手动删除——这就是"止血"实际止掉的东西，而工装漏点当时仍在。）
@@ -586,25 +589,37 @@
     这类基线副本，按授权范围**保留**）。
   - **收尾复跑**：`check_widget.py` **18/18** 全绿，跑完 `goat-widget-harness-*`/`goat-height-trace-*`
     目录 **0 个**、命令行命中 harness 前缀的浏览器进程 **0 个**。
-- **仍遗留（未拍板，别擅自动手）**：开机自启按用户决定应为"只跟随 Command Code 启停、不再设计自启"，
-  但 `install.ps1` 的 `Register-Autostart` 目前仍是**无条件**写 `HKCU\...\Run\GOATGaugeWatchdog`
-  （`--auto-launch` 才受开关控制）。完全去掉自启的代价是**登录后读数条不再自己回来**（要手动起），
-  而"真正随宿主起停"的挂载点（IFEO 一类）在 §10 已被明令禁止 ⇒ 这一条需要用户单独定夺。
-- **commit**：`17e6f18`（工装收尾）、`7b82dbb`（测试目录）、`eeee82b`（扫旧守卫）。回滚点 `0031774`。
+- **登录自启同日撤除（`e2db3d9` `2d3894e`）**：用户定调"只跟随 Command Code 启停"，于是 Run 键注册与
+  `tools/make-shortcut.ps1 -Startup` 两处一起删掉，`uninstall.ps1` 保留 Run 键清除并**补上「启动」条目
+  的清除路径**（删功能必须给它留下的东西一条退路），两者都先核对指向、同名别处的原样保留。
+  契约由 `NoLoginAutostartTests` 读脚本文本锁住（注册发生在 PowerShell 里，Python 单测碰不到执行路径，
+  只能把脚本当被测对象）。**代价已写进 §10 A-9**：重启后读数条不会自己回来。
+  本机核对：Run 键无该值，「启动」文件夹里没有 `GOAT Gauge Server.lnk`（这台机器没用过 `-Startup`）。
+- **commit**：`17e6f18`（工装收尾）、`7b82dbb`（测试目录）、`eeee82b`（扫旧守卫）、`e2db3d9`（撤自启）、
+  `2d3894e`（契约断言）。回滚点 `0031774`。
 
 
 ## 10. 安装与卸载的边界
 
 - `install.ps1`：探测解释器 → 建项目内 `.venv` → 装 `websocket-client`（官方 → 清华 → 阿里逐个回退，
-  **绝不关闭 TLS 校验**）→ 写 HKCU Run 键（**`entry.py --serve --inject`**，一个进程同时干服务、注入、
-  可选的一次性带端口拉起宿主）→ 打印状态。**幂等**，重复执行只补齐。
-- `uninstall.ps1`：删 Run 键 → 停服务与守护 → `__goatDispose()` → 删 `.venv`。`%LOCALAPPDATA%\GOATGauge\`
-  默认保留，`-Purge` 才删。不碰宿主安装目录、不碰宿主 CSP。
-- **L-7 自启动必须注册"完整形态"**：只跑 `--watch` 时服务缺席，后果是**静默降级**而非报错——
+  **绝不关闭 TLS 校验**）→ **不注册任何登录自启** → 立即拉起一次（`entry.py --serve --inject`，
+  一个进程同时干服务与注入）→ 打印状态。**幂等**，重复执行只补齐。
+- `uninstall.ps1`：清掉**旧版本**留下的两处登录自启（HKCU Run 键值 + 「启动」文件夹里指向本仓库的
+  `GOAT Gauge Server.lnk`）→ 停服务与守护 → `__goatDispose()` → 删 `.venv`。两处都先核对指向，
+  同名但属于别处的值/链接原样保留。`%LOCALAPPDATA%\GOATGauge\` 默认保留，`-Purge` 才删。
+  不碰宿主安装目录、不碰宿主 CSP。
+- **A-9 读数条只跟随宿主，不跟随登录**：安装器不得写 Run 键、`tools/make-shortcut.ps1` 不得放「启动」
+  条目。这条由 `tests/test_watchdog.py::NoLoginAutostartTests` 用**读脚本文本**的方式锁住——注册发生在
+  PowerShell 里，任何 Python 单测都碰不到它，唯一拦得住回潮的方式就是把脚本本身当被测对象。
+  **代价要写清**：机器重启后读数条不会自己回来，得跑 `launch.ps1 -ServerOnly` 或
+  `entry.py --serve --inject`。**撤掉一个功能必须同时留一条清除路径**，否则老版本注册过的机器上，
+  那个条目会一直生效而当前代码里再没有任何东西认识它。
+- **L-7 启动命令必须是"完整形态"**：只跑 `--watch` 时服务缺席，后果是**静默降级**而非报错——
   月份分母从套餐上限 `mplan`(10) 退成"本周期实测最大余量" `mest`(7.16)（屏上 `0/7.16`），
   且 `gen`/`rate` 这类按 D-7 只由服务供给的指标永远不出现。2026-10-12 真机实测踩中：
   `fp` 尾部 `src=-+host+sample+mest` ⇒ 无推送。`--watch` 保留为"只要 D2 纯宿主自给、不开 HTTP 端口"的
-  可选降级模式，但不再是默认注册项。`--port` 默认值同步改成 18927（`--status` 探测的就是它，
+  可选降级模式，但**不是**拉起时该用的形态（自 2026-10-13 起也没有任何自动拉起，见 A-9）。
+  `--port` 默认值同步改成 18927（`--status` 探测的就是它，
   默认 0 会让自检永远报 `reachable: false`）。
 - 两者都**不**创建/改写 Command Code 的**安装目录**，也不新建开始菜单项；带端口启动是一条独立命令，
   是否使用由用户决定。唯一的例外是下面 S1：`-WithShortcut` 会改**已存在的启动快捷方式**（含机器级那一个），
@@ -622,9 +637,10 @@
   install 与 uninstall **对称地各请求一次**（只在真的被拒时才提权）。
   失败模式必须写清：**已有无端口实例在跑时，带参数的启动只会聚焦旧窗口**（宿主 `requestSingleInstanceLock`），
   这条与上游 `ide/README.md:45` 的说明一致。
-- **S2（可选，默认关）：`install.ps1 -AutoLaunch` 让开机那一次判定里，若宿主完全没运行就带端口拉起。**
+- **S2（可选，默认关）：`install.ps1 -AutoLaunch` 让**本次**拉起那一次判定里，若宿主完全没运行就带端口拉起。**
   语义是**只判定一次**：第一眼看到宿主在跑（哪怕没端口）就永久放弃拉起，否则用户主动退出 Command Code 后
-  会被后台重新打开——那不再叫"跟随宿主"。该逻辑抽成 `watchdog.follow_startup_launch()`，由默认注册项
+  会被后台重新打开——那不再叫"跟随宿主"。2026-10-13 起它只作用于安装器立即启动的那一个进程
+  （不再有"开机那一次"，见 A-9）。该逻辑抽成 `watchdog.follow_startup_launch()`，由
   `entry.py --serve --inject --auto-launch` 与降级模式 `--watch --auto-launch` **共用**，判定与措辞只有一处。
 - **仍然禁止**：IFEO（Image File Execution Options）一类启动劫持。实测宿主的 GPU/网络/渲染子进程
   都是**同一个 exe** 带 `--type=…` 派生（`tasklist` 实据），而 IFEO 在 CreateProcess 层生效 ⇒ 它会拦下

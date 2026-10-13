@@ -67,12 +67,11 @@ python entry.py --chrome --demo
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\tools\make-shortcut.ps1
-# 可选: 同时注册「登录后静默启动本地服务」
-powershell -ExecutionPolicy Bypass -File .\tools\make-shortcut.ps1 -Startup
 ```
 
 This creates a **GOAT Gauge (Chrome)** shortcut on the desktop together with
-`assets/goat-gauge.ico`.
+`assets/goat-gauge.ico`. It registers nothing that runs at login — the readout
+follows Command Code, so starting the local server stays a deliberate action.
 
 The shortcut targets a hidden `powershell.exe` running `launch.ps1` rather than
 `cmd.exe`, which is what makes it behave well on the taskbar: no black console
@@ -85,8 +84,7 @@ prevents the taskbar shortcut from opening the dashboard before the local
 server is available.
 
 In `-ServerOnly` mode, the same launcher starts only the local server and never
-opens a browser window. This is the mode used by the optional login startup
-entry.
+opens a browser window — use it when you want the readout without a dashboard.
 
 The normal launcher is also self-healing. It opens the PWA first so the
 dedicated Chrome profile exposes its authenticated session through DevTools,
@@ -108,9 +106,10 @@ In the dashboard, open **设置 → 安装为桌面应用**. Once installed, GOA
 appears in the Start menu and can be pinned to the taskbar with the purple icon
 and its own window identity.
 
-Because the installed app talks to `http://127.0.0.1:18927`, register the server
-to start at login (`-Startup` above) if you want the pinned app to work right
-after a reboot. The pinned app itself needs the local server running.
+Because the installed app talks to `http://127.0.0.1:18927`, it needs the local
+server running. Nothing starts that server at login on purpose: run
+`.\launch.ps1 -ServerOnly`, or `python entry.py --serve --inject`, when you want
+the readout — it then follows Command Code for as long as that process lives.
 
 ## Credential lookup
 
