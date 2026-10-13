@@ -9,7 +9,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "17";
+  const VERSION = "18";
   const ID = "goat-gauge-widget";
   const POLL_VISIBLE_MS = 2500;
   const POLL_HIDDEN_MS = 15000;
@@ -18,6 +18,20 @@
 
   if (window.__goatWidgetVersion === VERSION && document.getElementById(ID)) {
     return;
+  }
+  /* One painter per row. A page can end up with two closures of the same version
+   * because the guard above only asks whether a node exists: when the host's React
+   * drops our node the next injection builds a second one while the first closure's
+   * heartbeat and poll are still running - and each paints the board it remembers
+   * into whichever node answers to the id. That is how a metric gets drawn twice,
+   * its neighbour vanishes, and the status dot turns into a chip. Taking over means
+   * disposing the previous owner first, whatever its version said it was. */
+  if (typeof window.__goatDispose === "function") {
+    try {
+      window.__goatDispose();
+    } catch {
+      // A closure too broken to dispose must not be able to block the new one.
+    }
   }
 
   const LOCALES = {
@@ -146,9 +160,18 @@
     heartbeat: null,
     observer: null,
     resizer: null,
+    visibility: null,
     mountedIn: null,
+    // The element this closure built. Painting is only ever allowed into it:
+    // a closure that lost the node has lost the board, not inherited it.
+    node: null,
     slots: [],
     shapeChanges: [],
+    reorders: 0,
+    // A drag that crossed a chip ends on a click over its new neighbour; that click
+    // is the release, not an intent to hide. Timed, so a keyboard click an action
+    // button takes later is never swallowed.
+    suppressUntil: 0,
     shedLevel: -1,
     shedChanges: [],
     levelChanges: 0,
@@ -212,7 +235,9 @@
     try {
       const saved = JSON.parse(raw);
       const known = (list) =>
-        Array.isArray(list) ? list.filter((id) => DEFAULT_ORDER.indexOf(id) >= 0) : [];
+        Array.isArray(list)
+          ? list.filter((id, index) => DEFAULT_ORDER.indexOf(id) >= 0 && list.indexOf(id) === index)
+          : [];
       const order = known(saved.order);
       const hidden = known(saved.hidden);
       const rest = DEFAULT_ORDER.filter((id) => order.indexOf(id) === -1);
@@ -289,7 +314,9 @@
   }
 
   /* Reorder by identifier so the rule is testable without synthetic pointer
-   * events; the drag handler only ever computes a target index. */
+   * events; the drag handler only ever computes a target index. A pointer moves
+   * many times between two crossings, so a wanted sequence that is already the
+   * current one must not cost a render. */
   function moveMetric(fromId, toId, before) {
     if (fromId === toId) {
       return;
@@ -306,26 +333,43 @@
     } else {
       order.splice(before ? target : target + 1, 0, fromId);
     }
+    if (order.join(" ") === layout.order.join(" ")) {
+      return;
+    }
     layout.order = order;
     render();
   }
 
   function commitDomOrder(ids) {
-    const visible = ids.filter((id) => layout.order.indexOf(id) >= 0);
+    // The DOM is only evidence of intent when it holds exactly the chips this
+    // layout renders. Anything else - a repeated id, an id we are hiding, an id
+    // we never had - belongs to somebody else's write, and baking it in is how a
+    // duplicate of one chip silently displaces its neighbour for good.
+    const keeps = layout.order.filter((id) => layout.hidden.indexOf(id) < 0);
+    const seen = [];
+    for (const id of ids) {
+      if (keeps.indexOf(id) >= 0 && seen.indexOf(id) < 0) {
+        seen.push(id);
+      }
+    }
+    if (seen.length !== keeps.length) {
+      return false;
+    }
     const result = layout.order.slice();
     // Rewrite only the slots the rendered metrics occupied. Metrics that happen
     // to have no data right now keep their position instead of being pushed to
     // the tail by an absence that is not the user's doing.
     const slots = [];
     for (let index = 0; index < result.length; index += 1) {
-      if (visible.indexOf(result[index]) >= 0) {
+      if (keeps.indexOf(result[index]) >= 0) {
         slots.push(index);
       }
     }
     slots.forEach((slot, position) => {
-      result[slot] = visible[position];
+      result[slot] = seen[position];
     });
     layout.order = result;
+    return true;
   }
 
   /* A progress bar with no semantics reads as nothing at all, and `4/6` is
@@ -352,8 +396,15 @@
     return `<button class="hide" type="button" data-hide="${id}" title="${L.hide}" aria-label="${L.hide}">×</button>`;
   }
 
+  /* The affordance has to be discoverable before the first failed drag: a dashed
+   * border alone does not say the chip may be moved. Only `title` - an aria-label
+   * here would replace the reading of the label and value instead of adding to it. */
+  function grab() {
+    return layout.editing ? ` title="${locale().dragHint}"` : "";
+  }
+
   const chip = (id, label, value, extraClass) =>
-    `<span class="chip${extraClass ? " " + extraClass : ""}" data-metric="${id}">` +
+    `<span class="chip${extraClass ? " " + extraClass : ""}" data-metric="${id}"${grab()}>` +
     `<b>${label}</b><em>${value}</em>${chrome(id)}</span>`;
 
   function meterChip(id, label, used, cap, resetAt, extraClass) {
@@ -363,7 +414,7 @@
     const share = used / cap;
     const tone = share >= 0.95 ? "danger" : share >= 0.85 ? "warn" : "";
     return (
-      `<span class="chip meter${tone ? " " + tone : ""}" data-metric="${id}">` +
+      `<span class="chip meter${tone ? " " + tone : ""}" data-metric="${id}"${grab()}>` +
       `<b>${label}</b><em>${trim(used)}/${trim(cap)}</em>` +
       bar(share, tone, label, used, cap) +
       `<span class="cd">${countdown(resetAt)}</span>${chrome(id)}</span>`
@@ -610,7 +661,7 @@
         // Still no ceiling by either route: show the remainder without a bar
         // rather than inventing a denominator to fill one.
         return (
-          `<span class="chip meter" data-metric="month"><b>${L.month}</b>` +
+          `<span class="chip meter" data-metric="month"${grab()}><b>${L.month}</b>` +
           `<em>${trim(host.monthly)} ${L.remaining}</em>` +
           `<span class="cd">${countdown(reset)}</span>${chrome("month")}</span>`
         );
@@ -629,7 +680,7 @@
         const tone = share >= 0.95 ? "danger" : share >= 0.85 ? "warn" : "";
         // Same shape as every other meter; the numbers go through compact() because
         // a token window is five or six digits and trim() would print them raw.
-        return `<span class="chip meter${tone ? " " + tone : ""}" data-metric="ctx">` +
+        return `<span class="chip meter${tone ? " " + tone : ""}" data-metric="ctx"${grab()}>` +
           `<b>${L.context}</b><em>${compact(current)}/${compact(limit)}</em>` +
           bar(share, tone, L.context, current, limit) +
           // No countdown: a context window has no reset moment, and an empty .cd
@@ -728,9 +779,12 @@
       setFlag(target, cls, true);
     }
     for (const cls of [...target.classList]) {
-      if (cls !== "shed") {
-        setFlag(target, cls, source.classList.contains(cls));
+      // `shed` is the row's width decision and `dragging` is the pointer's, so a
+      // content patch must never undo either one.
+      if (cls === "shed" || cls === "dragging") {
+        continue;
       }
+      setFlag(target, cls, source.classList.contains(cls));
     }
     const style = source.getAttribute("style");
     if (style === null) {
@@ -770,34 +824,64 @@
    * mode, layout save) still take the full write; a data change only touches the
    * slots whose generated markup differs, and even then patches in place.
    * Generated strings are compared against generated strings - never against
-   * outerHTML - because shedding adds classes to descendants afterwards. */
+   * outerHTML - because shedding adds classes to descendants afterwards.
+   *
+   * A reorder is not a shape change: when the same elements are wanted in a new
+   * sequence they are moved, not regenerated. Rebuilding the row was what made a
+   * drag die after one crossing - the element under the pointer became a stranger,
+   * its `dragging` class went with it, and every bar restarted its transition. */
   function paint(row, parts) {
     const keys = parts.map(partKey);
     const previous = state.slots;
     const sameShape =
       previous.length === parts.length && previous.every((slot, index) => slot.key === keys[index]);
-    if (!sameShape) {
-      // Bounded diagnostic: a shape change is the one case that still rewrites the
-      // whole row, so it has to name itself instead of being inferred from a
-      // MutationObserver count.
-      if (state.shapeChanges.length < 4) {
-        state.shapeChanges.push({
-          had: previous.map((slot) => slot.key).join(","),
-          now: keys.join(","),
-        });
-      }
-      row.innerHTML = parts.join("");
-      // Slots are taken from what the DOM actually holds, so a substrate that
-      // models fewer elements than we generated (the string-level shim) keeps
-      // taking the full-write path instead of patching the wrong node.
-      state.slots = [...row.children].map((child, index) => {
-        const outer = typeof child.outerHTML === "string" ? child.outerHTML : "";
-        return { key: partKey(outer || parts[index] || ""), markup: outer };
-      });
+    if (sameShape) {
+      patchSlots(previous, parts);
       return;
     }
-    parts.forEach((markup, index) => {
-      const slot = previous[index];
+    const held = new Map();
+    for (const slot of previous) {
+      if (slot.node && slot.node.isConnected && !held.has(slot.key)) {
+        held.set(slot.key, slot.node);
+      }
+    }
+    const movable =
+      new Set(keys).size === keys.length && keys.length === held.size &&
+      keys.every((key) => held.has(key));
+    if (movable) {
+      const wanted = keys.map((key) => held.get(key));
+      const remembered = new Map(previous.map((slot) => [slot.key, slot]));
+      reorder(row, wanted);
+      state.reorders += 1;
+      state.slots = keys.map((key, index) => {
+        const slot = remembered.get(key) || { markup: "" };
+        return { key, markup: slot.markup, node: wanted[index] };
+      });
+      patchSlots(state.slots, parts);
+      return;
+    }
+    // Bounded diagnostic: a shape change is the one case that still rewrites the
+    // whole row, so it has to name itself instead of being inferred from a
+    // MutationObserver count.
+    if (state.shapeChanges.length < 4) {
+      state.shapeChanges.push({
+        had: previous.map((slot) => slot.key).join(","),
+        now: keys.join(","),
+      });
+    }
+    row.innerHTML = parts.join("");
+    // Slots are taken from what the DOM actually holds, so a substrate that
+    // models fewer elements than we generated (the string-level shim) keeps
+    // taking the full-write path instead of patching the wrong node.
+    state.slots = [...row.children].map((child, index) => {
+      const outer = typeof child.outerHTML === "string" ? child.outerHTML : "";
+      return { key: partKey(outer || parts[index] || ""), markup: outer, node: child };
+    });
+  }
+
+  function patchSlots(slots, parts) {
+    slots.forEach((slot, index) => {
+      const markup = parts[index];
       if (slot.markup === markup) {
         return;
       }
@@ -805,16 +889,56 @@
       const holder = document.createElement("div");
       holder.innerHTML = markup;
       const source = holder.firstElementChild;
-      const target = row.children[index];
-      if (source && target) {
-        patchNode(target, source);
+      if (source && slot.node) {
+        patchNode(slot.node, source);
       }
     });
   }
 
+  /* Move only the elements that are out of place, then slide them into their new
+   * places instead of teleporting: an order that changes silently is exactly the
+   * "no visual feedback" complaint. Web Animations leaves no attribute behind, so
+   * an idle board still writes nothing at all. */
+  function reorder(row, wanted) {
+    const slides =
+      typeof Element === "function" && typeof wanted[0].animate === "function" && !reducedMotion();
+    const first = wanted.map((node) => (slides ? node.getBoundingClientRect().left : 0));
+    wanted.forEach((node, index) => {
+      const at = row.children[index];
+      if (at !== node) {
+        row.insertBefore(node, at || null);
+      }
+    });
+    if (!slides) {
+      return;
+    }
+    wanted.forEach((node, index) => {
+      if (drag && drag.node === node) {
+        return;  // the lifted chip sits where the pointer put it
+      }
+      const shift = first[index] - node.getBoundingClientRect().left;
+      if (Math.abs(shift) < 1) {
+        return;
+      }
+      node.animate(
+        [{ transform: `translateX(${shift}px)` }, { transform: "translateX(0)" }],
+        { duration: 160, easing: "ease-out" }
+      );
+    });
+  }
+
+  function reducedMotion() {
+    return (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  }
+
   function render() {
     const node = document.getElementById(ID);
-    if (!node) {
+    if (!node || node !== state.node) {
+      // Not the row this closure built: whatever answers to the id now is another
+      // painter's board, and writing into it is the double-draw that eats metrics.
       return;
     }
     const host = state.host ? hostPayload(state.host) : null;
@@ -1177,7 +1301,7 @@
 :host([data-edit="on"]) #row{flex-wrap:wrap;max-height:none;overflow:visible;row-gap:5px}
 .chip{position:relative;display:inline-flex;align-items:center;gap:3px;white-space:nowrap;
   opacity:.9;padding:2px 5px;border:1px solid transparent;border-radius:7px;
-  transition:background .12s ease,border-color .12s ease}
+  transition:background .12s ease,border-color .12s ease,box-shadow .12s ease}
 .chip:hover{background:color-mix(in srgb,currentColor 10%,transparent);
   border-color:color-mix(in srgb,currentColor 24%,transparent)}
 .chip b{font-weight:600;opacity:.6;font-size:10px;letter-spacing:.02em}
@@ -1220,7 +1344,10 @@
 :host([data-edit="on"]) .chip{border:1px dashed color-mix(in srgb,currentColor 38%,transparent);
   cursor:grab}
 :host([data-edit="on"]) .chip.muted{cursor:default;border-style:dotted}
-:host([data-edit="on"]) .chip.dragging{opacity:.55;cursor:grabbing}
+:host([data-edit="on"]) .chip.dragging{opacity:1;cursor:grabbing;z-index:2;
+  border:1px solid var(--goat-accent,#7c5cf6);
+  background:color-mix(in srgb,var(--goat-accent,#7c5cf6) 16%,transparent);
+  box-shadow:0 5px 16px rgba(0,0,0,.25)}
 .chip .hide{display:none;position:absolute;right:-5px;bottom:-5px;width:15px;height:15px;
   place-items:center;padding:0;border-radius:50%;border:1px solid color-mix(in srgb,currentColor 30%,transparent);
   background:var(--goat-surface,#fff);color:inherit;font:inherit;font-size:11px;line-height:1;
@@ -1242,7 +1369,9 @@
     const step = () => {
       fitQueued = false;
       const node = document.getElementById(ID);
-      const row = node && node.shadowRoot ? node.shadowRoot.getElementById("row") : null;
+      const row = node && node === state.node && node.shadowRoot
+        ? node.shadowRoot.getElementById("row")
+        : null;
       // Only the width the tier was judged against can buy presentation back. The
       // observer also fires for our own height changes, and re-opening the decision
       // for those is a two-state oscillator: wrap, grow, observe, re-judge, unwrap.
@@ -1273,8 +1402,9 @@
     window.addEventListener("resize", refit);
   }
 
-  /* Row-level delegation: chips are rebuilt on every render, so listeners must
-   * not live on them. */
+  /* Row-level delegation: a render can replace any chip at any moment, so the
+   * listeners that must never be lost live on the row - and the ones that have to
+   * outlive the row entirely (the release) live on the window. */
   function bindEvents(root, node) {
     const row = root.getElementById("row");
     row.addEventListener("pointerdown", (event) => {
@@ -1289,18 +1419,24 @@
         return;
       }
       const chipNode = ownerChip(event.target);
-      if (!chipNode || chipNode.classList.contains("muted")) {
+      if (!chipNode || !chipNode.getAttribute("data-metric")) {
         return;
       }
-      drag = { id: chipNode.getAttribute("data-metric"), node: chipNode };
-      chipNode.classList.add("dragging");
-      row.addEventListener("pointermove", onDragMove);
-      row.addEventListener("pointerup", onDragEnd);
+      if (chipNode.classList.contains("muted")) {
+        return;
+      }
+      beginDrag(event, chipNode);
     });
-    row.addEventListener("pointermove", onDragMove);
     row.addEventListener("click", (event) => {
       event.stopPropagation();
       const target = event.target;
+      if (now() < state.suppressUntil) {
+        // A drag releases over the chip it just jumped over, and every hide button
+        // overhangs 5px into its neighbour: without this the drag itself hides a
+        // metric, which is a very convincing "the board ate my data".
+        state.suppressUntil = 0;
+        return;
+      }
       const hidden = target.getAttribute("data-hide");
       if (hidden !== null) {
         hideMetric(hidden);
@@ -1335,46 +1471,130 @@
     return node;
   }
 
+  function beginDrag(event, chipNode) {
+    // A second press while one is live must close the first: its class would stay
+    // on a chip nobody is holding, and its listeners would never be withdrawn.
+    stopDrag();
+    drag = {
+      id: chipNode.getAttribute("data-metric"),
+      node: chipNode,
+      pointerId: event.pointerId,
+      x: event.clientX || 0,
+      from: event.clientX || 0,
+      frame: 0,
+      moved: false,
+    };
+    setFlag(chipNode, "dragging", true);
+    window.addEventListener("pointermove", onDragMove);
+    window.addEventListener("pointerup", onDragEnd);
+    window.addEventListener("pointercancel", onDragEnd);
+    if (typeof chipNode.setPointerCapture === "function" && event.pointerId !== undefined) {
+      try {
+        chipNode.setPointerCapture(event.pointerId);
+      } catch {
+        // The window listeners already cover a release outside the board.
+      }
+    }
+  }
+
+  function stopDrag() {
+    if (!drag) {
+      return false;
+    }
+    const moved = drag.moved;
+    const node = drag.node;
+    if (drag.frame) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(drag.frame);
+      } else {
+        clearTimeout(drag.frame);
+      }
+    }
+    if (typeof node.releasePointerCapture === "function" && typeof node.hasPointerCapture === "function") {
+      try {
+        if (node.hasPointerCapture(drag.pointerId)) {
+          node.releasePointerCapture(drag.pointerId);
+        }
+      } catch {
+        // Already gone with the node.
+      }
+    }
+    setFlag(node, "dragging", false);
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+    window.removeEventListener("pointercancel", onDragEnd);
+    drag = null;
+    return moved;
+  }
+
   function onDragMove(event) {
     if (!drag) {
       return;
     }
-    const row = drag.node.parentElement;
-    if (!row) {
+    if (event.buttons === 0) {
+      // Nothing is held down any more; a stray move must not keep the board
+      // rearranging itself under the cursor.
+      onDragEnd();
       return;
     }
-    const siblings = chips(row).filter((c) => c !== drag.node);
-    const x = event.clientX === undefined ? drag.x || 0 : event.clientX;
+    if (event.clientX !== undefined) {
+      drag.x = event.clientX;
+    }
+    if (drag.frame) {
+      return;  // one crossing test per frame, however many moves arrived
+    }
+    drag.frame = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame(stepDrag)
+      : setTimeout(stepDrag, 16);
+  }
+
+  function stepDrag() {
+    if (!drag) {
+      return;
+    }
+    drag.frame = 0;
+    if (Math.abs(drag.x - drag.from) > 3) {
+      drag.moved = true;
+    }
+    const node = document.getElementById(ID);
+    const row = node && node === state.node && node.shadowRoot
+      ? node.shadowRoot.getElementById("row")
+      : null;
+    if (!row || !drag.node.isConnected) {
+      stopDrag();
+      return;
+    }
+    const siblings = chips(row).filter(
+      (chipNode) => chipNode !== drag.node && chipNode.getAttribute("data-metric")
+    );
+    if (!siblings.length) {
+      return;
+    }
     let before = null;
     for (const sibling of siblings) {
       const rect = sibling.getBoundingClientRect();
-      if (x < rect.left + rect.width / 2) {
+      if (drag.x < rect.left + rect.width / 2) {
         before = sibling;
         break;
       }
     }
-    const anchorId = before ? before.getAttribute("data-metric") : null;
-    if (!before && siblings.length) {
-      moveMetric(drag.id, siblings[siblings.length - 1].getAttribute("data-metric"), false);
+    if (before) {
+      moveMetric(drag.id, before.getAttribute("data-metric"), true);
       return;
     }
-    if (anchorId) {
-      moveMetric(drag.id, anchorId, true);
-    }
+    moveMetric(drag.id, siblings[siblings.length - 1].getAttribute("data-metric"), false);
   }
 
   function onDragEnd() {
-    if (!drag) {
-      return;
+    if (stopDrag()) {
+      state.suppressUntil = now() + 500;
     }
-    drag.node.classList.remove("dragging");
-    const row = document.getElementById(ID);
-    if (row && row.shadowRoot) {
+    const node = document.getElementById(ID);
+    if (node && node === state.node && node.shadowRoot) {
       commitDomOrder(
-        [...row.shadowRoot.querySelectorAll("[data-metric]")].map((c) => c.getAttribute("data-metric"))
+        [...node.shadowRoot.querySelectorAll("[data-metric]")].map((c) => c.getAttribute("data-metric"))
       );
     }
-    drag = null;
     render();
   }
 
@@ -1390,6 +1610,7 @@
     row.id = "row";
     root.append(style, row);
     bindEvents(root, node);
+    state.node = node;
     return node;
   }
 
@@ -1413,11 +1634,14 @@
       return false;
     }
     const existing = document.getElementById(ID);
-    if (existing && existing.parentElement === parent) {
+    if (existing && existing === state.node && existing.parentElement === parent) {
       state.mountedIn = parent;
       return true;
     }
     if (existing) {
+      // Somebody else's row - a closure that outlived its own dispose, or the host
+      // re-rendering around a node we no longer own. Two rows with this id in one
+      // document is undefined behaviour, and ours is the only one we may paint.
       existing.remove();
     }
     const node = build();
@@ -1604,6 +1828,14 @@
     // The injection runs before the host has rendered its composer, so a failed
     // first mount is the normal case and must leave the retry machinery behind.
     if (!state.heartbeat) {
+      // Named and remembered: a dispose that cannot undo this listener leaves the
+      // "disposed" closure alive, and it starts polling again on the next tab
+      // switch - which is a second painter on a board that looks single-owner.
+      state.visibility = () => {
+        if (!document.hidden) {
+          schedule(0);
+        }
+      };
       state.heartbeat = setInterval(tick, 1000);
       // Host re-renders replace the composer subtree; re-anchor on any change.
       state.observer = new MutationObserver(tick);
@@ -1613,11 +1845,7 @@
         attributes: true,
         attributeFilter: ["data-theme", "class", "lang"],
       });
-      document.addEventListener("visibilitychange", () => {
-        if (!document.hidden) {
-          schedule(0);
-        }
-      });
+      document.addEventListener("visibilitychange", state.visibility);
     }
     if (mount()) {
       onMounted();
@@ -1626,7 +1854,7 @@
 
   function tick() {
     const node = document.getElementById(ID);
-    if (!node || node.parentElement !== state.mountedIn) {
+    if (!node || node !== state.node || node.parentElement !== state.mountedIn) {
       if (mount()) {
         onMounted();
       }
@@ -1753,6 +1981,11 @@
       return row ? editorGeometry(row, node) : null;
     })(),
     metrics: currentLayout(),
+    // Single-writer self-proof: does the node answering to the id belong to the
+    // closure being asked? A false here is the double-draw that eats metrics.
+    ownsNode: document.getElementById(ID) === state.node,
+    dragging: Boolean(drag),
+    reorders: state.reorders,
     dark: (document.getElementById(ID) || {}).dataset ? document.getElementById(ID).dataset.dark : "",
     fingerprint: fingerprint(),
     session: state.threadId ? "known" : "none",
@@ -1803,14 +2036,22 @@
 
   window.__goatDispose = () => {
     state.generation += 1;  // orphan any in-flight bridge call before the board goes away
+    stopDrag();
     if (state.timer) clearTimeout(state.timer);
     if (state.heartbeat) clearInterval(state.heartbeat);
     if (state.observer) state.observer.disconnect();
     if (state.resizer) state.resizer.disconnect();
+    if (state.visibility && typeof document.removeEventListener === "function") {
+      document.removeEventListener("visibilitychange", state.visibility);
+    }
     window.removeEventListener("resize", refit);
-    const node = document.getElementById(ID);
+    const node = state.node || document.getElementById(ID);
     if (node) node.remove();
-    state.timer = state.heartbeat = state.observer = null;
+    state.timer = state.heartbeat = state.observer = state.visibility = null;
+    // Ownership ends here as well: a disposed closure that still holds a node can
+    // answer to the id and start painting over its replacement.
+    state.node = null;
+    state.slots = [];
     window.__goatWidgetVersion = "";
     return { ok: true };
   };
