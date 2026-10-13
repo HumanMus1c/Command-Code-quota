@@ -561,5 +561,34 @@ class EntryCLITests(unittest.TestCase):
             self.assertEqual(self.forwarded(argv), expected, argv[0])
 
 
+class NoLoginAutostartTests(unittest.TestCase):
+    """The readout follows Command Code, so nothing may register a login autostart.
+
+    Two mechanisms existed at different times - the HKCU Run key and a 「启动」folder
+    .lnk - and only a check that reads the scripts keeps them from coming back.
+    """
+
+    @staticmethod
+    def _text(relative: str) -> str:
+        path = Path(__file__).resolve().parent.parent / relative
+        return path.read_text(encoding="utf-8-sig")
+
+    def test_installer_never_registers_the_run_key(self) -> None:
+        install = self._text("install.ps1")
+        self.assertNotIn("New-ItemProperty", install)
+        self.assertNotIn("Register-Autostart", install)
+
+    def test_shortcut_tool_never_registers_a_startup_entry(self) -> None:
+        self.assertNotIn("GetFolderPath('Startup')", self._text("tools/make-shortcut.ps1"))
+
+    def test_uninstaller_still_clears_both_legacy_registrations(self) -> None:
+        # Dropping a feature without a removal path strands the entry forever:
+        # an older machine would keep launching the gauge at login with nothing
+        # in the current code that even knows it registered it.
+        uninstall = self._text("uninstall.ps1")
+        self.assertIn("Remove-ItemProperty", uninstall)
+        self.assertIn("GOAT Gauge Server.lnk", uninstall)
+
+
 if __name__ == "__main__":
     unittest.main()
