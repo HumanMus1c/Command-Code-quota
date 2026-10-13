@@ -94,10 +94,11 @@ def _preserve_session_cookies(profile: Path) -> None:
         pass
 
 
-def open_chrome(url: str) -> subprocess.Popen[bytes]:
+def open_chrome(url: str) -> "subprocess.Popen[bytes] | None":
     profile = _profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
     _preserve_session_cookies(profile)
+    already_up = _cdp_alive()
     args = [
         chrome_path(),
         f"--remote-debugging-port={CDP_PORT}",
@@ -109,8 +110,18 @@ def open_chrome(url: str) -> subprocess.Popen[bytes]:
         "--app=" + url,
         "--window-size=1280,820",
     ]
-    log("opening " + url)
-    return subprocess.Popen(args, close_fds=True)
+    log("opening " + url + (" (handoff to the running instance)" if already_up else ""))
+    process = subprocess.Popen(args, close_fds=True)
+    if not already_up:
+        return process
+    # A second launch on a profile that is already serving hands the URL to that
+    # instance and exits. Its callers all discard the return value, so this is the
+    # only place that can reap it - left alone it is an unreaped child per click.
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        return process  # no handoff happened: it is an instance, so hand the handle up
+    return None
 
 
 def _cdp_alive() -> bool:
@@ -267,6 +278,8 @@ def main(
     finally:
         stop_server()
         service.stop()
+        # chrome_process is deliberately not terminated: it is the user's own
+        # browser window. Quitting the gauge must not close the session they are reading.
         log("server stopped")
 
 
