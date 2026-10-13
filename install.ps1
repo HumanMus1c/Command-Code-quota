@@ -1,19 +1,21 @@
 ﻿<#
 GOAT Gauge 安装器（一键）
 
-做四件事，全部幂等，重复执行只补齐：
+做三件事，全部幂等，重复执行只补齐：
   1. 找一个可用的 Python 3.10+（参数 -> PATH -> py -3 启动器 -> 常见安装目录）
   2. 在项目内建 .venv 并装依赖（官方源失败后依次回退清华、阿里；绝不关闭 TLS 校验）
-  3. 注册登录后静默启动的守护进程（HKCU Run 键，指向本仓库的 entry.py --watch）
-  4. 立即拉起守护并打印诊断
+  3. 立即拉起守护并打印诊断（**不注册任何开机自启**：读数条只跟随 Command Code 启停）
 
 用法（普通 PowerShell，无需管理员）:
   powershell -ExecutionPolicy Bypass -File .\install.ps1
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -CheckOnly      # 只体检，不写任何东西
-  powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoAutostart    # 不注册开机自启
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -IndexUrl <url> # 指定镜像源
+  powershell -ExecutionPolicy Bypass -File .\install.ps1 -NoStart        # 装完不立即启动
   powershell -ExecutionPolicy Bypass -File .\install.ps1 -WithShortcut   # 给你自己的快捷方式加调试端口参数（可选）
-  powershell -ExecutionPolicy Bypass -File .\install.ps1 -AutoLaunch     # 开机时若宿主完全没运行，带端口拉起一次（可选）
+  powershell -ExecutionPolicy Bypass -File .\install.ps1 -AutoLaunch     # 本次启动时若宿主完全没运行，带端口拉起一次（可选）
+
+本安装器**不再**写 HKCU Run 键、也不往「启动」文件夹放快捷方式——那是登录自启，与"跟随宿主"是两回事。
+旧版本注册过的两项由 uninstall.ps1 负责清除（它会先核对指向的是不是本仓库，指向别处的原样保留）。
 
 边界：本脚本**永不**碰 Command Code 的安装目录，也不碰机器级的 ProgramData 快捷方式（docs/DESIGN.md N-2/§10）。
 -WithShortcut 是唯一例外，且默认关闭：它只改**你自己账户下** %APPDATA% 里那个 .lnk 的 Arguments 字段，
@@ -23,7 +25,6 @@ GOAT Gauge 安装器（一键）
 param(
     [string]$PythonPath,
     [string]$IndexUrl,
-    [switch]$NoAutostart,
     [switch]$CheckOnly,
     [switch]$NoStart,
     [switch]$WithShortcut,
@@ -37,6 +38,7 @@ $Venv     = Join-Path $Repo '.venv'
 $VenvPy   = Join-Path $Venv 'Scripts\python.exe'
 $VenvPyw  = Join-Path $Venv 'Scripts\pythonw.exe'
 $EntryPy  = Join-Path $Repo 'entry.py'
+# 只为体检保留：本安装器不再写这两处，读出来是为了告诉用户旧版本还留着什么（清除走 uninstall.ps1）。
 $RunKey   = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunValue = 'GOATGaugeWatchdog'
 
@@ -134,16 +136,10 @@ function Test-Dependencies {
     return ($LASTEXITCODE -eq 0)
 }
 
-function Get-AutostartTarget {
-    # 一个进程同时干三件事：本地服务、注入读数条、（可选）开机时带端口拉起宿主。
-    # 注册成 --watch 会让服务缺席：月份分母退成估算值、gen/rate 这类只由服务供给的
-    # 指标永远不出现 —— 这是 2026-10-12 真机上实际踩到的残缺形态。
-    $line = ('"{0}" "{1}" --serve --inject' -f $VenvPyw, $EntryPy)
-    if ($AutoLaunch) { $line += ' --auto-launch' }
-    return $line
-}
-
 function Get-ServiceArguments {
+    # 一个进程同时干三件事：本地服务、注入读数条、（可选）带端口拉起宿主。
+    # 只跑 --watch 会让服务缺席：月份分母退成估算值、gen/rate 这类只由服务供给的
+    # 指标永远不出现 —— 这是 2026-10-12 真机上实际踩到的残缺形态（docs/DESIGN.md L-7）。
     $arguments = @("`"$EntryPy`"", '--serve', '--inject')
     if ($AutoLaunch) { $arguments += '--auto-launch' }
     return $arguments
@@ -163,18 +159,6 @@ function Set-LaunchShortcut {
     Write-Bad "机器级快捷方式需要管理员权限，正在请求一次提权。"
     Start-Process -FilePath $VenvPy -ArgumentList @("`"$EntryPy`"", '--install-shortcut') -Verb RunAs -WindowStyle Hidden -Wait
     Write-Done ((& $VenvPy $EntryPy --install-shortcut 2>&1 | Out-String).Trim())
-}
-
-function Register-Autostart {
-    $target = Get-AutostartTarget
-    $current = (Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue).$RunValue
-    if ($current -eq $target) {
-        Write-Ok "开机自启已注册（未改动）。"
-        return
-    }
-    if ($current) { Write-Bad "已有旧值，将覆盖: $current" }
-    New-ItemProperty -Path $RunKey -Name $RunValue -PropertyType String -Value $target -Force | Out-Null
-    Write-Ok "开机自启已注册: $RunValue"
 }
 
 function Start-Watchdog {
@@ -201,7 +185,7 @@ if ($CheckOnly) {
     Write-Step "体检模式：不创建、不安装、不写注册表"
     Write-Done (".venv 是否存在: " + (Test-Path -LiteralPath $VenvPy))
     if (Test-Path -LiteralPath $VenvPy) { Write-Done ("依赖是否就绪: " + (Test-Dependencies)) }
-    Write-Done ("开机自启当前值: " + (Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue).$RunValue)
+    Write-Done ("旧版开机自启残留 (Run 键): " + (Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue).$RunValue)
     & $base (Join-Path $Repo 'entry.py') --status 2>$null | Out-String | Write-Done
     exit 0
 }
@@ -227,7 +211,13 @@ if (Test-Dependencies) {
     Write-Ok "依赖已安装。"
 }
 
-if (-not $NoAutostart) { Register-Autostart } else { Write-Done "按 -NoAutostart 跳过开机自启。" }
+# 不注册任何东西。只在发现旧版本残留时说出来，清除交给 uninstall.ps1。
+$legacy = (Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue).$RunValue
+if ($legacy) {
+    Write-Step "发现旧版本的开机自启残留"
+    Write-Bad "HKCU Run 里还有 GOATGaugeWatchdog: $legacy"
+    Write-Done "本安装器不再写它；要清掉请跑 uninstall.ps1（指向别处的同名值会被原样保留）。"
+}
 
 if ($WithShortcut) {
     Write-Step "给你的启动快捷方式加上调试端口（可选）"

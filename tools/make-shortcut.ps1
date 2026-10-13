@@ -15,9 +15,7 @@
 [CmdletBinding()]
 param(
     [string]$Name = 'GOAT Gauge (Chrome)',
-    [switch]$SkipIcons,
-    # 额外注册开机自启: 登录后静默启动本地服务 (不开窗口)
-    [switch]$Startup
+    [switch]$SkipIcons
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,18 +55,5 @@ Write-Host ''
 Write-Host '提示: 如果想固定后带独立的应用图标与窗口归属, 走 PWA 安装:'
 Write-Host '  面板里打开"设置" -> "安装为桌面应用"'
 
-if ($Startup) {
-    $StartupDir  = [Environment]::GetFolderPath('Startup')
-    $StartupLink = Join-Path $StartupDir 'GOAT Gauge Server.lnk'
-
-    $startupShortcut = $shell.CreateShortcut($StartupLink)
-    $startupShortcut.TargetPath       = $PowerShell
-    $startupShortcut.Arguments        = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $LaunchPs1 + '" -ServerOnly'
-    $startupShortcut.WorkingDirectory = $ProjectDir
-    $startupShortcut.IconLocation     = "$IconPath,0"
-    $startupShortcut.Description      = 'GOAT Gauge 本地服务 (登录后静默启动)'
-    $startupShortcut.WindowStyle      = 7
-    $startupShortcut.Save()
-
-    Write-Host "已注册开机自启: $StartupLink"
-}
+# 这里不再有 -Startup：往「启动」文件夹或 HKCU Run 键注册登录自启，与"读数条只跟随
+# Command Code 启停"是两种设计。旧版本放下的条目由 uninstall.ps1 清除。

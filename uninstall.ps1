@@ -1,9 +1,11 @@
 ﻿<#
 GOAT Gauge 卸载器（一键）
 
-顺序: 从活页面移除读数条 -> 停守护进程 -> 注销开机自启 -> 删 .venv。
+顺序: 从活页面移除读数条 -> 停守护进程 -> 清除旧版本留下的两处登录自启注册 -> 删 .venv。
 默认**保留**运行时数据目录（历史库与加密凭据），要一起删才加 -Purge。
-本脚本从不触碰 Command Code 的安装目录、快捷方式或开始菜单项。
+本脚本从不触碰 Command Code 的安装目录、快捷方式或开始菜单项；
+它清的只有本工具自己留下的条目（HKCU Run 键值 + 「启动」文件夹里那个指向本仓库的 .lnk），
+且都先核对指向——同名但属于别处的值/链接一律原样保留。
 
 用法:
   powershell -ExecutionPolicy Bypass -File .\uninstall.ps1
@@ -92,7 +94,7 @@ if ($hasVenv) {
     Write-Skip "没有 .venv，无法自动还原；备份仍在数据目录（launch-shortcut.json / launch-shortcut-*.lnk.bak）。"
 }
 
-Write-Step "注销开机自启"
+Write-Step "清除旧版本注册的开机自启 (Run 键)"
 $current = (Get-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue).$RunValue
 if (-not $current) {
     Write-Done "未注册过，无需处理。"
@@ -101,6 +103,24 @@ if (-not $current) {
     Write-Ok "已删除 $RunValue。"
 } else {
     Write-Skip "保留指向别处的同名值: $current"
+}
+
+# 旧版 tools/make-shortcut.ps1 -Startup 往「启动」文件夹放过一个 .lnk，安装器从不认识它，
+# 只有这里能把它带走 —— 删功能必须同时给它留一条清除路径。
+Write-Step "清除旧版本放在「启动」文件夹里的条目"
+$startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'GOAT Gauge Server.lnk'
+if (-not (Test-Path -LiteralPath $startupLink)) {
+    Write-Done "没有该条目，无需处理。"
+} else {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut($startupLink)
+    $pointsHere = ($link.WorkingDirectory -eq $Repo) -or ($link.Arguments -like "*$Repo*")
+    if ($pointsHere) {
+        Remove-Item -LiteralPath $startupLink -Force
+        Write-Ok "已删除 $startupLink。"
+    } else {
+        Write-Skip "保留指向别处的同名链接: $($link.Arguments)"
+    }
 }
 
 Write-Step "删除虚拟环境"
