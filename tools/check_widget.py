@@ -16,6 +16,7 @@ from __future__ import annotations
 import http.server
 import json
 import os
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -50,9 +51,9 @@ def start_static_server(directory: Path) -> tuple[socketserver.TCPServer, int]:
     return server, server.server_address[1]
 
 
-def launch_browser(executable: str, profile: Path, window_size: str = "") -> int:
+def launch_browser(executable: str, profile: Path, window_size: str = "") -> tuple[int, subprocess.Popen]:
     extra = [f"--window-size={window_size}"] if window_size else []
-    subprocess.Popen(  # noqa: S603 - fixed allow-list of browser paths below
+    process = subprocess.Popen(  # noqa: S603 - fixed allow-list of browser paths below
         [
             executable,
             "--headless=new",
@@ -61,6 +62,11 @@ def launch_browser(executable: str, profile: Path, window_size: str = "") -> int
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--disable-gpu",
+            # A persistent profile that crashed makes Chromium relaunch itself with
+            # --restore-last-session --restart, so one leaked browser multiplies under
+            # memory pressure instead of dying. Refuse the bubble and the restore it drives.
+            "--disable-session-crashed-bubble",
+            "--hide-crash-restore-bubble",
             *extra,
             "about:blank",
         ],
@@ -69,15 +75,64 @@ def launch_browser(executable: str, profile: Path, window_size: str = "") -> int
         stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    port_file = profile / "DevToolsActivePort"
-    deadline = time.time() + 25
-    while time.time() < deadline:
-        if port_file.exists():
-            head = port_file.read_text(encoding="utf-8", errors="replace").splitlines()
-            if head and head[0].strip().isdigit():
-                return int(head[0].strip())
-        time.sleep(0.2)
-    raise RuntimeError("headless browser never wrote DevToolsActivePort")
+    try:
+        port_file = profile / "DevToolsActivePort"
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            if port_file.exists():
+                head = port_file.read_text(encoding="utf-8", errors="replace").splitlines()
+                if head and head[0].strip().isdigit():
+                    return int(head[0].strip()), process
+            time.sleep(0.2)
+        raise RuntimeError("headless browser never wrote DevToolsActivePort")
+    except BaseException:
+        # A browser that never reported a port is still a browser, and this call site
+        # is the only one holding its handle. Without this it becomes an orphan.
+        shutdown_browser(None, process, profile)
+        raise
+
+
+def shutdown_browser(
+    connection: CdpConnection | None,
+    process: subprocess.Popen | None,
+    profile: Path,
+) -> None:
+    """Close the harness browser, then delete the profile it locks.
+
+    terminate() reaps only the root process: renderers, utility processes and the
+    crashpad handler get re-parented and keep holding memory - that is how 61 leaked
+    browsers became 477 processes. So ask the browser to close itself, let it exit,
+    and only fall back to killing the whole tree when it does not.
+    """
+    if connection is not None:
+        try:
+            connection.call("Browser.close")
+        except Exception:  # noqa: BLE001 - the socket dies with the browser, which is the goal
+            pass
+        connection.close()
+    if process is not None:
+        try:
+            process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            subprocess.run(  # noqa: S603 - literal tool, killing a tree we spawned
+                ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=20,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+    # Windows keeps the directory locked briefly after the last handle closes.
+    for _ in range(10):
+        shutil.rmtree(profile, ignore_errors=True)
+        if not profile.exists():
+            return
+        time.sleep(0.3)
+    print(f"WARN  harness profile survived cleanup: {profile}", file=sys.stderr)
 
 
 def page_target(port: int) -> dict:
@@ -456,14 +511,15 @@ def main() -> int:
     web_root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "app" / "web"
     server, port = start_static_server(web_root)
     profile = Path(tempfile.mkdtemp(prefix="goat-widget-harness-"))
-    process = None
+    process: subprocess.Popen | None = None
+    connection: CdpConnection | None = None
     results: list[tuple[str, bool, str]] = []
 
     try:
         import threading
 
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        debug_port = launch_browser(executable, profile)
+        debug_port, process = launch_browser(executable, profile)
         target = page_target(debug_port)
         connection = CdpConnection(target["webSocketDebuggerUrl"], timeout=20)
         harness = Harness(connection)
@@ -725,10 +781,8 @@ def main() -> int:
             + json.dumps(member, ensure_ascii=False),
         ))
 
-        connection.close()
     finally:
-        if process is not None:
-            process.terminate()
+        shutdown_browser(connection, process, profile)
         server.shutdown()
         server.server_close()
 

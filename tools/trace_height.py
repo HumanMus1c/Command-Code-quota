@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -28,6 +29,7 @@ from check_widget import (  # noqa: E402
     BROWSERS,
     launch_browser,
     page_target,
+    shutdown_browser,
     start_static_server,
 )
 
@@ -143,9 +145,11 @@ def main() -> int:
 
     server, port = start_static_server(Path(args.web) if args.web else ROOT / "app" / "web")
     profile = Path(tempfile.mkdtemp(prefix="goat-height-trace-"))
+    process: subprocess.Popen | None = None
+    connection: CdpConnection | None = None
     try:
         threading.Thread(target=server.serve_forever, daemon=True).start()
-        debug_port = launch_browser(executable, profile, args.window)
+        debug_port, process = launch_browser(executable, profile, args.window)
         target = page_target(debug_port)
         connection = CdpConnection(target["webSocketDebuggerUrl"], timeout=20)
         connection.call("Page.enable")
@@ -187,8 +191,8 @@ def main() -> int:
         shapes = json.loads(evaluate(connection, "JSON.stringify(window.__goatProbe().shapeChanges)") or "[]")
         board_log = json.loads(evaluate(connection, "JSON.stringify(window.__goatProbe().boardLog)") or "[]")
         board_changes = evaluate(connection, "window.__goatProbe().boardChanges")
-        connection.close()
     finally:
+        shutdown_browser(connection, process, profile)
         server.shutdown()
         server.server_close()
 
